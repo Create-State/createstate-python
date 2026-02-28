@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "createstate"
+version = "0.1.25"
+description = "Create State - Enterprise AI Code Intelligence Platform SDK"
+readme = {file = "README.md", content-type = "text/markdown"}
+license = {text = "MIT"}
+authors = [
+    {name = "Create State", email = "support@createstate.ai"}
+]
+maintainers = [
+    {name = "Create State", email = "support@createstate.ai"}
+]
+keywords = [
+    "ai",
+    "code-analysis",
+    "knowledge-graph",
+    "mcp",
+    "developer-tools",
+    "code-intelligence",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Quality Assurance",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "httpx>=0.24.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://createstate.ai"
+Documentation = "https://createstate.ai/web/api"
+Repository = "https://github.com/Create-State/createstate-python"
+Issues = "https://github.com/Create-State/createstate-python/issues"
+
+[project.scripts]
+create-state = "createstate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["createstate*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "0.1.25"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
