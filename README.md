@@ -96,6 +96,14 @@ create-state configure
 # Initialize a world model for your project (automatically set as active)
 create-state init --name "My Project"
 
+# Or import directly from GitHub (NEW in v0.3.0!)
+
+# Connect GitHub first (if importing a private repository)
+create-state auth github
+
+# Import repository and create world model
+create-state init --from-github https://github.com/owner/repo
+
 # Check status of your active model
 create-state status
 
@@ -504,6 +512,64 @@ Without `-v`, only the response is shown (no PARAMETERS section).
 | `handoff create` | Create session handoff package |
 | `handoff list` | List available handoff packages |
 | `handoff restore <id>` | Restore from session handoff |
+| `auth github` | Connect/manage GitHub account |
+| `init --from-github <url>` | Import from GitHub repository |
+
+### GitHub Integration (NEW in v0.3.0)
+
+Import repositories directly from GitHub to create World Models with full
+code analysis.
+
+**Connect GitHub (required for private repos):**
+
+```bash
+# Connect via Device Flow (browser-based auth)
+create-state auth github
+
+# Check connection status
+create-state auth github --status
+
+# Disconnect
+create-state auth github --disconnect
+```
+
+**Import from GitHub:**
+
+```bash
+# Import a public repository
+create-state init --from-github https://github.com/owner/repo
+
+# Import a specific branch
+create-state init --from-github https://github.com/owner/repo --branch develop
+
+# Import with custom project name
+create-state init --from-github https://github.com/owner/repo --name "My Project"
+```
+
+The import process:
+1. Validates the GitHub URL
+2. Checks GitHub connection (for private repos)
+3. Clones and analyzes the repository server-side
+4. Creates a World Model with full code graph
+5. Sets the new model as active
+
+```
+$ create-state init --from-github https://github.com/fastapi/fastapi
+
+[GitHub Import] fastapi/fastapi
+
+# Checking GitHub connection...
+[OK] GitHub connected as: your-username
+
+# Starting import...
+Importing repository.......................
+
+[SUCCESS] GitHub import complete!
+
+Project: fastapi
+Model ID: abc123-def456
+Files Imported: 342
+```
 
 ### Command Details
 
@@ -685,6 +751,46 @@ insights = client.get_insights(focus_area="security")
 
 # Autonomous insights
 insights = client.get_shower_thinking_insights(priority_filter="high")
+```
+
+### GitHub Integration (NEW in v0.3.0)
+
+```python
+# Check if GitHub is connected
+status = client.github_status()
+if status["connected"]:
+    print(f"Connected as {status['username']}")
+
+# Connect GitHub (interactive - opens browser)
+result = client.github_connect()
+print(f"Connected as {result['username']}")
+
+# Import a repository
+result = client.github_import(
+    repo_url="https://github.com/owner/repo",
+    project_name="My Project",
+    branch="main",  # Optional
+    wait=True,      # Wait for completion (default)
+    progress_callback=lambda p: print(f"{p['progress']}% - {p['message']}")
+)
+print(f"Model ID: {result['model_id']}")
+print(f"Files: {result['files_imported']}")
+
+# Import without waiting (async)
+job = client.github_import(
+    "https://github.com/owner/repo",
+    "My Project",
+    wait=False
+)
+# Poll manually
+status = client.github_import_status(job["job_id"])
+print(f"{status['progress']}% complete")
+
+# Cancel an import
+client.github_import_cancel(job["job_id"])
+
+# Disconnect GitHub
+client.github_disconnect()
 ```
 
 ## Error Handling
