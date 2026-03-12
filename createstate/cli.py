@@ -44,6 +44,9 @@ from pathlib import Path
 from .client import CreateStateClient
 from .exceptions import AuthenticationError, CreateStateError
 
+# Use the same base URL as the client (varies by build: prod/beta/dev)
+DEFAULT_BASE_URL = CreateStateClient.DEFAULT_BASE_URL
+
 
 # ANSI color codes (disabled if not a TTY)
 def _supports_color() -> bool:
@@ -213,6 +216,291 @@ def get_client() -> CreateStateClient:
     return CreateStateClient(api_key=api_key, base_url=base_url)
 
 
+def cmd_auth(args: argparse.Namespace) -> int:
+    """Manage OAuth connections (GitHub, etc.)."""
+
+    auth_command = getattr(args, "auth_command", None)
+
+    if not auth_command:
+        print(yellow("[INFO]") + " OAuth management commands:")
+        print()
+        print(
+            f"  {cyan('create-state auth github')}             - Connect GitHub account"
+        )
+        print(
+            f"  {cyan('create-state auth github --status')}    - Check connection status"
+        )
+        print(f"  {cyan('create-state auth github --disconnect')}- Disconnect GitHub")
+        print()
+        return 0
+
+    if auth_command == "github":
+        return cmd_auth_github(args)
+
+    print(yellow("[ERROR]") + f" Unknown auth command: {auth_command}")
+    return 1
+
+
+def cmd_auth_github(args: argparse.Namespace) -> int:
+    """Connect or manage GitHub OAuth connection via Device Flow.
+
+    Uses GitHub's Device Flow for CLI-friendly authentication:
+    1. Requests a device code from Create State server
+    2. User visits github.com/login/device and enters the code
+    3. CLI polls until authorization completes
+    4. Token is stored server-side (encrypted, never returned to CLI)
+
+    Args:
+        args: Command arguments (--status, --disconnect)
+
+    Returns:
+        0 on success, 1 on failure
+    """
+    import time
+    import urllib.error
+    import urllib.request
+
+    config = load_config()
+    api_key = os.environ.get("CREATESTATE_API_KEY") or config.get("api_key")
+    base_url = os.environ.get("CREATESTATE_API_URL") or config.get(
+        "api_url", DEFAULT_BASE_URL
+    )
+    # Normalize: strip trailing slash and /mcp suffix (config may have /mcp for MCP client)
+    base_url = base_url.rstrip("/")
+    if base_url.endswith("/mcp"):
+        base_url = base_url[:-4]
+
+    if not api_key:
+        print(yellow("[ERROR]") + " No API key configured.")
+        print()
+        print(
+            "Run " + cyan("create-state configure") + " to set up your API key first."
+        )
+        return 1
+
+    # Check status via SDK endpoint
+    if args.status:
+        print(dim("# Checking GitHub connection status..."))
+        try:
+            req = urllib.request.Request(
+                f"{base_url}/sdk/github/status",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode())
+
+            if data.get("connected"):
+                print(
+                    green("[OK]")
+                    + f" GitHub connected as: {cyan(data.get('username', 'unknown'))}"
+                )
+                print(dim(f"     Scopes: {', '.join(data.get('scopes', []))}"))
+                if data.get("is_expired"):
+                    print(yellow("[WARNING]") + " Token has expired. Reconnect with:")
+                    print(dim("            create-state auth github"))
+            else:
+                print(dim("# GitHub not connected"))
+                print()
+                print("Connect your GitHub account to access private repositories:")
+                print(f"  {cyan('create-state auth github')}")
+
+            return 0
+
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                print(yellow("[ERROR]") + " Authentication failed. Run:")
+                print(dim("           create-state configure"))
+            else:
+                print(yellow("[ERROR]") + f" API error: {e.code}")
+            return 1
+        except Exception as e:
+            print(yellow("[ERROR]") + f" Failed to check status: {e}")
+            return 1
+
+    # Disconnect via SDK endpoint
+    if args.disconnect:
+        print(dim("# Disconnecting GitHub..."))
+        try:
+            req = urllib.request.Request(
+                f"{base_url}/sdk/github/disconnect",
+                method="POST",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                data=b"{}",
+            )
+
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode())
+
+            if data.get("success"):
+                print(green("[OK]") + " GitHub account disconnected")
+            else:
+                print(dim("# No GitHub connection to disconnect"))
+
+            return 0
+
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                print(yellow("[ERROR]") + " Authentication failed. Run:")
+                print(dim("           create-state configure"))
+            else:
+                print(yellow("[ERROR]") + f" API error: {e.code}")
+            return 1
+        except Exception as e:
+            print(yellow("[ERROR]") + f" Failed to disconnect: {e}")
+            return 1
+
+    # Default: initiate Device Flow
+    print(green("[GitHub OAuth]") + " Connect your GitHub account")
+    print()
+
+    try:
+        # Step 1: Initiate device flow
+        print(dim("# Requesting device code..."))
+
+        req = urllib.request.Request(
+            f"{base_url}/auth/cli/device-flow",
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            data=b"{}",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                device_data = json.loads(response.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                print(yellow("[ERROR]") + " Authentication failed. Run:")
+                print(dim("           create-state configure"))
+                return 1
+            elif e.code == 429:
+                print(
+                    yellow("[ERROR]")
+                    + " Rate limited. Please wait a few minutes and try again."
+                )
+                return 1
+            else:
+                error_body = e.read().decode() if e.fp else ""
+                print(yellow("[ERROR]") + f" Failed to initiate device flow: {e.code}")
+                if error_body:
+                    try:
+                        error_data = json.loads(error_body)
+                        print(
+                            dim(
+                                f"           {error_data.get('detail', error_body[:100])}"
+                            )
+                        )
+                    except Exception:
+                        pass
+                return 1
+
+        user_code = device_data.get("user_code")
+        verification_uri = device_data.get("verification_uri")
+        device_code = device_data.get("device_code")
+        expires_in = device_data.get("expires_in", 900)
+        interval = device_data.get("interval", 5)
+
+        if not user_code or not device_code:
+            print(yellow("[ERROR]") + " Invalid response from server")
+            return 1
+
+        # Step 2: Display instructions to user
+        print()
+        print(f"Visit:  {cyan(verification_uri)}")
+        print(f"Enter code:  {bold(user_code)}")
+        print()
+        print(dim(f"# Code expires in {expires_in // 60} minutes"))
+        print()
+
+        # Step 3: Poll for completion
+        poll_url = f"{base_url}/auth/cli/device-poll"
+        start_time = time.time()
+        max_time = expires_in
+
+        sys.stdout.write("Waiting for authorization...")
+        sys.stdout.flush()
+
+        while (time.time() - start_time) < max_time:
+            time.sleep(interval)
+
+            try:
+                poll_req = urllib.request.Request(
+                    poll_url,
+                    method="POST",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    data=json.dumps({"device_code": device_code}).encode(),
+                )
+
+                with urllib.request.urlopen(poll_req, timeout=30) as response:
+                    poll_data = json.loads(response.read().decode())
+
+                if poll_data.get("success"):
+                    sys.stdout.write(" " + green("[OK]") + "\n")
+                    sys.stdout.flush()
+                    print()
+                    print(
+                        green("[OK]")
+                        + f" GitHub connected as: {cyan(poll_data.get('username', 'unknown'))}"
+                    )
+                    return 0
+
+                if poll_data.get("pending"):
+                    sys.stdout.write(".")
+                    sys.stdout.flush()
+                    continue
+
+                if poll_data.get("error"):
+                    sys.stdout.write(" " + yellow("[FAILED]") + "\n")
+                    sys.stdout.flush()
+                    print(yellow("[ERROR]") + f" {poll_data['error']}")
+                    return 1
+
+            except urllib.error.HTTPError as e:
+                if e.code == 400:
+                    error_body = e.read().decode() if e.fp else ""
+                    sys.stdout.write(" " + yellow("[FAILED]") + "\n")
+                    sys.stdout.flush()
+                    try:
+                        error_data = json.loads(error_body)
+                        print(
+                            yellow("[ERROR]")
+                            + f" {error_data.get('detail', 'Request failed')}"
+                        )
+                    except Exception:
+                        print(yellow("[ERROR]") + " Device code expired or invalid")
+                    return 1
+                elif e.code == 403:
+                    sys.stdout.write(" " + yellow("[FAILED]") + "\n")
+                    sys.stdout.flush()
+                    print(yellow("[ERROR]") + " Authorization denied")
+                    return 1
+                else:
+                    continue
+            except Exception:
+                continue
+
+        sys.stdout.write(" " + yellow("[TIMEOUT]") + "\n")
+        sys.stdout.flush()
+        print(yellow("[ERROR]") + " Authorization timed out. Please try again.")
+        return 1
+
+    except KeyboardInterrupt:
+        print("\n" + dim("# Cancelled"))
+        return 1
+    except Exception as e:
+        print(yellow("[ERROR]") + f" Failed to connect GitHub: {e}")
+        return 1
+
+
 def cmd_configure(args: argparse.Namespace) -> int:
     """Configure the CLI with API credentials."""
     print(bold("Create State CLI Configuration"))
@@ -231,7 +519,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
 
     # Optional: custom API URL
     if args.advanced:
-        current_url = config.get("api_url", "https://createstate.ai")
+        current_url = config.get("api_url", DEFAULT_BASE_URL)
         print(f"\nCurrent API URL: {dim(current_url)}")
         api_url = input("Enter API URL (or press Enter for default): ").strip()
         if api_url:
@@ -490,8 +778,328 @@ def _capture_directory_files(
     return captured_count
 
 
+def cmd_init_from_github(args: argparse.Namespace) -> int:
+    """Initialize a world model from a GitHub repository.
+
+    This command uses server-side import to:
+    1. Validate the GitHub URL
+    2. Check GitHub connection (prompt to connect if needed)
+    3. Start server-side import via bootstrap API
+    4. Poll for completion with progress updates
+    5. Set the new model as active
+
+    Benefits of server-side import:
+    - Works with private repositories via OAuth
+    - No local git installation required
+    - Handles large repositories
+    - Automatic synthesis after import
+
+    Args:
+        args: Command arguments including from_github URL, name, branch
+
+    Returns:
+        0 on success, 1 on failure
+    """
+    import re as regex
+    import time
+    import urllib.error
+    import urllib.request
+
+    github_url = args.from_github.strip()
+
+    # Validate GitHub URL format
+    github_pattern = regex.compile(
+        r"^https://github\.com/([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?)/([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?)(?:\.git)?/?$"
+    )
+    match = github_pattern.match(github_url)
+    if not match:
+        print(yellow("[ERROR]") + " Invalid GitHub URL format.")
+        print(dim("         Expected: https://github.com/owner/repo"))
+        return 1
+
+    owner = match.group(1)
+    repo_name = match.group(2)
+
+    # Get config and API key
+    config = load_config()
+    api_key = os.environ.get("CREATESTATE_API_KEY") or config.get("api_key")
+    base_url = os.environ.get("CREATESTATE_API_URL") or config.get(
+        "api_url", DEFAULT_BASE_URL
+    )
+    # Normalize: strip trailing slash and /mcp suffix (config may have /mcp for MCP client)
+    base_url = base_url.rstrip("/")
+    if base_url.endswith("/mcp"):
+        base_url = base_url[:-4]
+
+    if not api_key:
+        print(yellow("[ERROR]") + " No API key configured.")
+        print()
+        print(
+            "Run " + cyan("create-state configure") + " to set up your API key first."
+        )
+        return 1
+
+    # Get project name
+    if args.name:
+        project_name = args.name
+    else:
+        default_name = repo_name
+        try:
+            user_input = input(f"Project name [{default_name}]: ").strip()
+            project_name = user_input if user_input else default_name
+        except (EOFError, KeyboardInterrupt):
+            print("\n" + dim("# Cancelled"))
+            return 1
+
+    print()
+    print(green("[GitHub Import]") + f" {owner}/{repo_name}")
+    print()
+
+    try:
+        # Check GitHub connection status first
+        print(dim("# Checking GitHub connection..."))
+        try:
+            status_req = urllib.request.Request(
+                f"{base_url}/sdk/github/status",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+
+            with urllib.request.urlopen(status_req, timeout=10) as response:
+                status_data = json.loads(response.read().decode())
+
+            if status_data.get("connected"):
+                print(
+                    green("[OK]")
+                    + f" GitHub connected as: {cyan(status_data.get('username', 'unknown'))}"
+                )
+            else:
+                print(dim("# GitHub not connected"))
+                print()
+                print(
+                    "To import private repositories, connect your GitHub account first:"
+                )
+                print(f"  {cyan('create-state auth github')}")
+                print()
+                print("Proceeding with public repository import...")
+
+        except urllib.error.HTTPError as e:
+            # Don't fail on GitHub status check - it's informational only
+            # The actual import request will fail if there's a real auth problem
+            if e.code == 401:
+                print(dim("# GitHub status check unavailable, proceeding..."))
+            else:
+                print(dim(f"# Could not check GitHub status ({e.code}), proceeding..."))
+        except Exception:
+            print(dim("# Could not check GitHub status, proceeding..."))
+
+        # Start server-side import via SDK endpoint (API key auth)
+        print()
+        print(dim("# Starting import..."))
+
+        import_payload = {
+            "repo_url": github_url,
+            "project_name": project_name,
+        }
+
+        if args.branch:
+            import_payload["branch"] = args.branch
+
+        import_url = f"{base_url}/sdk/github/import"
+        debug_mode = getattr(args, "debug", False) or os.environ.get(
+            "CREATESTATE_DEBUG"
+        )
+        if debug_mode:
+            print(dim(f"# DEBUG: base_url = {base_url}"))
+            print(dim(f"# DEBUG: import_url = {import_url}"))
+            print(dim(f"# DEBUG: DEFAULT_BASE_URL = {DEFAULT_BASE_URL}"))
+
+        bootstrap_req = urllib.request.Request(
+            import_url,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            data=json.dumps(import_payload).encode(),
+        )
+
+        try:
+            with urllib.request.urlopen(bootstrap_req, timeout=30) as response:
+                bootstrap_data = json.loads(response.read().decode())
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode() if e.fp else ""
+
+            if e.code == 401:
+                print(yellow("[ERROR]") + " Authentication failed. Run:")
+                print(dim("           create-state configure"))
+                return 1
+            elif e.code == 403:
+                print(
+                    yellow("[ERROR]") + " Access denied. The repository may be private."
+                )
+                print()
+                print("Connect your GitHub account to import private repositories:")
+                print(f"  {cyan('create-state auth github')}")
+                return 1
+            elif e.code == 400:
+                try:
+                    error_data = json.loads(error_body)
+                    detail = error_data.get("detail", "")
+                    if "already has an active" in detail.lower():
+                        print(yellow("[ERROR]") + " An import is already in progress.")
+                        print(
+                            dim(
+                                "         Wait for it to complete or check status with:"
+                            )
+                        )
+                        print(dim("         create-state models"))
+                        return 1
+                    print(yellow("[ERROR]") + f" {detail}")
+                except Exception:
+                    print(yellow("[ERROR]") + f" Bad request: {error_body[:200]}")
+                return 1
+            elif e.code == 429:
+                print(
+                    yellow("[ERROR]")
+                    + " Rate limit exceeded. Please wait and try again."
+                )
+                return 1
+            else:
+                print(yellow("[ERROR]") + f" Server error: {e.code}")
+                return 1
+
+        job_id = bootstrap_data.get("job_id")
+        if not job_id:
+            print(yellow("[ERROR]") + " No job ID returned from server")
+            return 1
+
+        print(green("[OK]") + " Import started")
+        print(dim(f"     Job ID: {job_id}"))
+        print()
+
+        # Poll for completion
+        sys.stdout.write("Importing repository")
+        sys.stdout.flush()
+
+        last_status = ""
+        last_progress = 0
+        max_wait = 600  # 10 minutes max
+        start_time = time.time()
+
+        while (time.time() - start_time) < max_wait:
+            time.sleep(3)
+
+            try:
+                progress_req = urllib.request.Request(
+                    f"{base_url}/sdk/github/import-progress/{job_id}",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+
+                with urllib.request.urlopen(progress_req, timeout=10) as response:
+                    progress_data = json.loads(response.read().decode())
+
+                status = progress_data.get("status", "")
+                progress = progress_data.get("progress", 0)
+
+                if status == "completed":
+                    sys.stdout.write(" " + green("[OK]") + "\n")
+                    sys.stdout.flush()
+
+                    model_id = progress_data.get("model_id")
+                    files_captured = progress_data.get(
+                        "entities_created", 0
+                    ) or progress_data.get("files_captured", 0)
+
+                    if model_id:
+                        set_active_model(model_id, project_name)
+
+                    print()
+                    print(green("[SUCCESS]") + " GitHub import complete!")
+                    print()
+                    print(f"Project: {cyan(project_name)}")
+                    if model_id:
+                        print(f"Model ID: {dim(model_id)}")
+                    print(f"Entities created: {files_captured}")
+                    print()
+                    print("Next steps:")
+                    print(
+                        f"  {cyan('create-state status')}        - View model details"
+                    )
+                    query_cmd = 'create-state query "..."'
+                    print(f"  {cyan(query_cmd)}  - Search your codebase")
+
+                    return 0
+
+                elif status == "failed":
+                    sys.stdout.write(" " + yellow("[FAILED]") + "\n")
+                    sys.stdout.flush()
+
+                    error = progress_data.get("error", "Unknown error")
+                    print(yellow("[ERROR]") + f" Import failed: {error}")
+
+                    if "private" in error.lower() or "authentication" in error.lower():
+                        print()
+                        print(
+                            "This may be a private repository. Connect GitHub to import it:"
+                        )
+                        print(f"  {cyan('create-state auth github')}")
+
+                    return 1
+
+                else:
+                    # Still in progress
+                    if progress > last_progress:
+                        dots = (progress - last_progress) // 10
+                        sys.stdout.write("." * max(1, dots))
+                        sys.stdout.flush()
+                        last_progress = progress
+                    elif status != last_status:
+                        sys.stdout.write(".")
+                        sys.stdout.flush()
+
+                    last_status = status
+
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    sys.stdout.write(" " + yellow("[FAILED]") + "\n")
+                    sys.stdout.flush()
+                    print(yellow("[ERROR]") + " Import job not found")
+                    return 1
+                # Continue polling on other errors
+                continue
+            except Exception:
+                # Continue polling on network errors
+                continue
+
+        sys.stdout.write(" " + yellow("[TIMEOUT]") + "\n")
+        sys.stdout.flush()
+        print(
+            yellow("[ERROR]")
+            + " Import timed out. The repository may still be processing."
+        )
+        print(dim("         Check status with: create-state models"))
+        return 1
+
+    except KeyboardInterrupt:
+        print("\n" + dim("# Cancelled"))
+        return 1
+    except Exception as e:
+        print(yellow("[ERROR]") + f" Import failed: {str(e)}")
+        if is_verbose():
+            import traceback
+
+            traceback.print_exc()
+        return 1
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """Initialize a world model for the current project."""
+
+    # Handle --from-github flag
+    from_github = getattr(args, "from_github", None)
+    if from_github and isinstance(from_github, str):
+        return cmd_init_from_github(args)
+
     project_path = Path(args.path or ".").resolve()
 
     # Get project name - prompt if not provided
@@ -969,6 +1577,56 @@ def cmd_query(args: argparse.Namespace) -> int:
                     "query": query,
                     "model_id": active.get("id", ""),
                     "include_code": include_code,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    """Ask a question using AI chat with your project context."""
+    question = " ".join(args.question)
+
+    if not question:
+        print(red("[ERROR]") + " Please provide a question")
+        return 1
+
+    # Check for active model
+    active = get_active_model()
+    if not active.get("id"):
+        print(red("[ERROR]") + " No active world model.")
+        print()
+        cmd1 = cyan("create-state init --name 'My Project'")
+        cmd2 = cyan("create-state use <model>")
+        print(f"First create or select a model: {cmd1}")
+        print(f"Or select an existing one: {cmd2}")
+        return 1
+
+    model_name = active.get("name", "Unknown")
+    print(dim(f"# Asking {model_name}: {question}"))
+    print()
+
+    client = get_client()
+
+    try:
+        result = client.ask(
+            question=question,
+            model_id=active.get("id", ""),
+        )
+
+        # Print the response from the AI
+        print_response(result)
+
+        # Verbose mode: also show parameters sent
+        if is_verbose():
+            print_parameters(
+                {
+                    "question": question,
+                    "model_id": active.get("id", ""),
                 }
             )
 
@@ -1502,6 +2160,11 @@ Examples:
   create-state use "My App"               Switch by name (or partial ID)
   create-state status                     Show active model status
 
+  # GitHub integration (NEW)
+  create-state auth github                Connect your GitHub account
+  create-state init --from-github <url>   Import from GitHub repository
+  create-state init --from-github <url> --branch dev   Import specific branch
+
   # Capture to knowledge graph (persists data)
   create-state capture context "..."      Capture decisions/discussions
   create-state capture code ./file.py     Capture single file
@@ -1510,11 +2173,11 @@ Examples:
   # Analyze code (transient by default)
   create-state analyze ./src              Analyze only (no persistence)
   create-state analyze ./src --capture    Analyze AND persist to graph
-  create-state ask "why Redis?"        Ask questions about your project
-  create-state thinking                Get autonomous AI insights
-  create-state synthesize              Create AINOTES-style summary
-  create-state handoff create          Save session for continuity
-  create-state configure               Set up your API key
+  create-state ask "why Redis?"           Ask questions about your project
+  create-state thinking                   Get autonomous AI insights
+  create-state synthesize                 Create AINOTES-style summary
+  create-state handoff create             Save session for continuity
+  create-state configure                  Set up your API key
 
 Get your API key at: https://createstate.ai/web/api-keys
         """,
@@ -1546,6 +2209,39 @@ Get your API key at: https://createstate.ai/web/api-keys
         help="Show advanced configuration options",
     )
     configure_parser.set_defaults(func=cmd_configure)
+
+    # auth command - OAuth management
+    auth_parser = subparsers.add_parser(
+        "auth",
+        help="Manage OAuth connections (GitHub, etc.)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  create-state auth github             Connect your GitHub account
+  create-state auth github --status    Check connection status
+  create-state auth github --disconnect   Revoke GitHub access
+        """,
+    )
+    auth_subparsers = auth_parser.add_subparsers(
+        dest="auth_command", help="Auth commands"
+    )
+
+    # auth github - Connect GitHub account
+    auth_github_parser = auth_subparsers.add_parser(
+        "github",
+        help="Connect or manage GitHub account for private repo access",
+    )
+    auth_github_parser.add_argument(
+        "--disconnect",
+        action="store_true",
+        help="Disconnect GitHub account",
+    )
+    auth_github_parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show current connection status",
+    )
+    auth_parser.set_defaults(func=cmd_auth)
 
     # analyze command
     analyze_parser = subparsers.add_parser(
@@ -1582,6 +2278,17 @@ Get your API key at: https://createstate.ai/web/api-keys
     init_parser = subparsers.add_parser(
         "init",
         help="Initialize a world model for a project",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  create-state init                       Initialize from current directory
+  create-state init --name "My App"       Initialize with custom name
+  create-state init ./my-project          Initialize from specific path
+
+  # GitHub import (requires: create-state auth github)
+  create-state init --from-github https://github.com/user/repo
+  create-state init --from-github https://github.com/user/repo --branch develop
+        """,
     )
     init_parser.add_argument(
         "path",
@@ -1600,6 +2307,20 @@ Get your API key at: https://createstate.ai/web/api-keys
     init_parser.add_argument(
         "--description",
         help="Project description",
+    )
+    init_parser.add_argument(
+        "--from-github",
+        metavar="URL",
+        help="Initialize from a GitHub repository URL (e.g., https://github.com/owner/repo)",
+    )
+    init_parser.add_argument(
+        "--branch",
+        help="Branch to clone (default: repository default branch, only used with --from-github)",
+    )
+    init_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Show debug information (URLs, etc.)",
     )
     init_parser.set_defaults(func=cmd_init)
 
@@ -1693,39 +2414,46 @@ Get your API key at: https://createstate.ai/web/api-keys
     )
     capture_code_parser.set_defaults(func=cmd_capture_code)
 
-    # query command
+    # query command - graph search
     query_parser = subparsers.add_parser(
         "query",
-        help="Query the project knowledge graph",
+        help="Search knowledge graph for matching files, decisions, and insights",
+        description=(
+            "Direct graph search using keyword matching. Returns CodeEntities "
+            "(captured files), Decisions, and Insights that match your search terms. "
+            "Searches names, file paths, and descriptions. Fast and deterministic - "
+            "use this when you know specific terms to look for."
+        ),
     )
     query_parser.add_argument(
         "query",
         nargs="+",
-        help="Natural language query",
+        help="Keywords to find in the knowledge graph (searches names, paths, descriptions)",
     )
     query_parser.add_argument(
         "--code",
         action="store_true",
-        help="Include code in results",
+        help="Include code content in results (not just file references)",
     )
     query_parser.set_defaults(func=cmd_query)
 
-    # ask command (alias for query - conversational interface)
+    # ask command - AI-powered chat interface
     ask_parser = subparsers.add_parser(
         "ask",
-        help="Ask questions about your project (alias for query)",
+        help="Get AI-generated answers using your project context (LLM chat)",
+        description=(
+            "AI-powered Q&A that generates conversational responses using your "
+            "configured LLM provider (BYOK) or the built-in Qwen model. Your full "
+            "project context is provided to the AI. Equivalent to chatting in the "
+            "web UI's world model chat panel."
+        ),
     )
     ask_parser.add_argument(
-        "query",
+        "question",
         nargs="+",
-        help="Your question",
+        help="Your question (AI generates a response using your project context)",
     )
-    ask_parser.add_argument(
-        "--code",
-        action="store_true",
-        help="Include code in results",
-    )
-    ask_parser.set_defaults(func=cmd_query)
+    ask_parser.set_defaults(func=cmd_ask)
 
     # insights command
     insights_parser = subparsers.add_parser(
@@ -1746,21 +2474,27 @@ Get your API key at: https://createstate.ai/web/api-keys
     )
     insights_parser.set_defaults(func=cmd_insights)
 
-    # search command
+    # search command - semantic vector search
     search_parser = subparsers.add_parser(
         "search",
-        help="Search project knowledge",
+        help="Semantic search using vector similarity (finds conceptually similar content)",
+        description=(
+            "Semantic search using AI vector embeddings. Unlike 'query' which matches "
+            "exact keywords, 'search' finds content that is conceptually similar to "
+            "your query - even if it uses different terminology. Use this when you're "
+            "not sure of exact terms or want to explore related concepts."
+        ),
     )
     search_parser.add_argument(
         "query",
         nargs="+",
-        help="Search query",
+        help="Natural language query (finds semantically similar content)",
     )
     search_parser.add_argument(
         "--limit",
         type=int,
         default=10,
-        help="Maximum results (default: 10)",
+        help="Maximum results to return (default: 10)",
     )
     search_parser.set_defaults(func=cmd_search)
 

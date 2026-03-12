@@ -395,6 +395,38 @@ class CreateStateClient:
             },
         )
 
+    def ask(
+        self,
+        question: str,
+        model_id: str = "",
+        project_path: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Ask a question about your project using AI chat.
+
+        Uses your configured BYOK model if set, otherwise the hosted Qwen model.
+        The AI has full context of your world model including code, decisions,
+        and captured knowledge.
+
+        Args:
+            question: Your question or message
+            model_id: World model ID (optional, uses active model if not specified)
+            project_path: Project path for additional git context
+
+        Returns:
+            AI-generated response based on your project knowledge
+
+        Example:
+            >>> response = client.ask("How does authentication work in this project?")
+            >>> print(response["content"][0]["text"])
+        """
+        params = {"message": question}
+        if model_id:
+            params["project_id"] = model_id
+        if project_path:
+            params["project_path"] = project_path
+        return self._mcp_call("llmChat", params)
+
     # -------------------------------------------------------------------------
     # Project Intelligence
     # -------------------------------------------------------------------------
@@ -1138,6 +1170,304 @@ class CreateStateClient:
             "patterns": all_patterns[:20],  # Limit returned patterns
             "summary": " | ".join(summary_parts),
         }
+
+    # =========================================================================
+    # GitHub Integration Methods
+    # =========================================================================
+
+    def github_status(self) -> Dict[str, Any]:
+        """
+        Check if GitHub is connected for the authenticated user.
+
+        Returns:
+            Dict containing:
+            - connected: Whether GitHub OAuth is connected
+            - username: GitHub username if connected
+            - scopes: OAuth scopes granted if connected
+
+        Example:
+            >>> client = CreateStateClient(api_key="cs_...")
+            >>> status = client.github_status()
+            >>> if status["connected"]:
+            ...     print(f"Connected as {status['username']}")
+        """
+        return self._request("GET", "/sdk/github/status")
+
+    def github_connect(
+        self,
+        open_browser: bool = True,
+        timeout: int = 300,
+        poll_interval: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Connect GitHub account using Device Flow authentication.
+
+        This initiates the OAuth Device Flow, which allows authentication
+        without exposing secrets. The user is prompted to visit a URL and
+        enter a code to authorize the connection.
+
+        Args:
+            open_browser: Automatically open verification URL in browser
+            timeout: Maximum seconds to wait for user authorization
+            poll_interval: Seconds between authorization checks (default: from server)
+
+        Returns:
+            Dict containing:
+            - success: Whether connection succeeded
+            - username: GitHub username on success
+            - user_code: Code user entered (for reference)
+
+        Raises:
+            APIError: If device flow fails or times out
+            RateLimitError: If rate limited
+
+        Example:
+            >>> client = CreateStateClient(api_key="cs_...")
+            >>> result = client.github_connect()
+            >>> print(f"Connected as {result['username']}")
+        """
+        import time
+        import webbrowser
+
+        response = self._request("POST", "/sdk/github/device-flow")
+
+        user_code = response.get("user_code")
+        verification_uri = response.get("verification_uri")
+        device_code = response.get("device_code")
+        expires_in = response.get("expires_in", timeout)
+        interval = poll_interval or response.get("interval", 5)
+
+        print(f"\nTo connect GitHub, visit: {verification_uri}")
+        print(f"Enter code: {user_code}")
+        print(f"(Code expires in {expires_in // 60} minutes)\n")
+
+        if open_browser:
+            try:
+                webbrowser.open(verification_uri)
+            except Exception:
+                pass
+
+        start_time = time.time()
+        effective_timeout = min(timeout, expires_in)
+
+        while time.time() - start_time < effective_timeout:
+            time.sleep(interval)
+
+            try:
+                poll_response = self._request(
+                    "POST",
+                    "/sdk/github/device-poll",
+                    {"device_code": device_code},
+                )
+
+                if poll_response.get("success"):
+                    return {
+                        "success": True,
+                        "username": poll_response.get("username"),
+                        "user_code": user_code,
+                    }
+
+                if poll_response.get("error"):
+                    raise APIError(poll_response["error"])
+
+            except RateLimitError:
+                interval = min(interval * 2, 30)
+            except APIError:
+                raise
+
+        raise APIError("GitHub authorization timed out")
+
+    def github_disconnect(self) -> bool:
+        """
+        Disconnect GitHub OAuth connection.
+
+        This removes the stored OAuth tokens. The user will need to
+        re-authorize to use GitHub features again.
+
+        Returns:
+            True if disconnection succeeded
+
+        Example:
+            >>> client = CreateStateClient(api_key="cs_...")
+            >>> client.github_disconnect()
+            True
+        """
+        response = self._request("POST", "/sdk/github/disconnect")
+        return response.get("success", False)
+
+    def github_import(
+        self,
+        repo_url: str,
+        project_name: str,
+        branch: Optional[str] = None,
+        force: bool = False,
+        wait: bool = True,
+        progress_callback: Optional[callable] = None,
+        poll_interval: int = 3,
+        timeout: int = 600,
+    ) -> Dict[str, Any]:
+        """
+        Import a GitHub repository into a new World Model.
+
+        Clones the repository, analyzes code, and creates a knowledge graph.
+        For private repositories, GitHub must be connected first via
+        github_connect().
+
+        Args:
+            repo_url: GitHub repository URL (https://github.com/owner/repo)
+            project_name: Name for the new World Model
+            branch: Branch to import (default: repository default branch)
+            force: Skip duplicate check if True
+            wait: If True, wait for import to complete. If False, return
+                  immediately with job_id for manual polling.
+            progress_callback: Optional callable(progress_dict) for progress updates
+            poll_interval: Seconds between progress checks (default: 3)
+            timeout: Maximum seconds to wait for completion (default: 600)
+
+        Returns:
+            Dict containing:
+            - success: Whether import completed successfully
+            - model_id: World Model ID (when wait=True and successful)
+            - job_id: Import job ID (for tracking)
+            - status: Final status
+            - message: Status message
+            - duplicate_warning: True if repo was already imported (when force=False)
+            - existing_models: List of existing imports (when duplicate detected)
+
+        Raises:
+            ValidationError: If repo_url is invalid
+            APIError: If import fails
+            RateLimitError: If rate limited
+
+        Example:
+            >>> client = CreateStateClient(api_key="cs_...")
+            >>> # Import with progress updates
+            >>> def on_progress(p):
+            ...     print(f"{p['progress']}% - {p['message']}")
+            >>> result = client.github_import(
+            ...     "https://github.com/owner/repo",
+            ...     "My Project",
+            ...     progress_callback=on_progress
+            ... )
+            >>> print(f"Created model: {result['model_id']}")
+        """
+        import time
+
+        response = self._request(
+            "POST",
+            "/sdk/github/import",
+            {
+                "repo_url": repo_url,
+                "project_name": project_name,
+                "branch": branch,
+                "force": force,
+            },
+        )
+
+        if response.get("duplicate_warning"):
+            return response
+
+        if not response.get("success"):
+            raise APIError(response.get("message", "Import failed to start"))
+
+        job_id = response.get("job_id")
+
+        if not wait:
+            return {
+                "success": True,
+                "job_id": job_id,
+                "message": "Import started in background",
+            }
+
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            progress = self.github_import_status(job_id)
+
+            if progress_callback:
+                try:
+                    progress_callback(progress)
+                except Exception:
+                    pass
+
+            status = progress.get("status", "")
+
+            if status == "completed":
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "model_id": progress.get("model_id"),
+                    "status": status,
+                    "message": progress.get("message", "Import completed"),
+                    "files_analyzed": progress.get("files_analyzed", 0),
+                    "entities_created": progress.get("entities_created", 0),
+                }
+
+            if status == "failed":
+                return {
+                    "success": False,
+                    "job_id": job_id,
+                    "status": status,
+                    "message": progress.get("message", "Import failed"),
+                    "error_message": progress.get("error_message"),
+                }
+
+            time.sleep(poll_interval)
+
+        return {
+            "success": False,
+            "job_id": job_id,
+            "status": "timeout",
+            "message": f"Import timed out after {timeout} seconds",
+        }
+
+    def github_import_status(self, job_id: str) -> Dict[str, Any]:
+        """
+        Get the status of a GitHub import job.
+
+        Args:
+            job_id: Import job ID from github_import()
+
+        Returns:
+            Dict containing:
+            - job_id: Job identifier
+            - status: Current status (pending, cloning, extracting, populating, completed, failed)
+            - phase: Current phase description
+            - progress: Progress percentage (0-100)
+            - message: Human-readable status message
+            - files_found: Number of files discovered
+            - files_analyzed: Number of files processed
+            - entities_created: Number of entities in knowledge graph
+            - model_id: World Model ID (when completed)
+            - error_message: Error details (when failed)
+
+        Example:
+            >>> client = CreateStateClient(api_key="cs_...")
+            >>> result = client.github_import(repo_url, name, wait=False)
+            >>> # Poll manually
+            >>> status = client.github_import_status(result["job_id"])
+            >>> print(f"{status['progress']}% complete")
+        """
+        return self._request("GET", f"/sdk/github/import-progress/{job_id}")
+
+    def github_import_cancel(self, job_id: str) -> bool:
+        """
+        Cancel an in-progress GitHub import.
+
+        Args:
+            job_id: Import job ID to cancel
+
+        Returns:
+            True if cancellation was accepted
+
+        Example:
+            >>> client = CreateStateClient(api_key="cs_...")
+            >>> result = client.github_import(repo_url, name, wait=False)
+            >>> # Later, cancel it
+            >>> client.github_import_cancel(result["job_id"])
+        """
+        response = self._request("POST", f"/sdk/github/import-cancel/{job_id}")
+        return response.get("success", False)
 
     def close(self):
         """Close the HTTP client."""

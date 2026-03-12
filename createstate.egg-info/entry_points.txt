@@ -1,0 +1,2 @@
+[console_scripts]
+create-state = createstate.cli:main

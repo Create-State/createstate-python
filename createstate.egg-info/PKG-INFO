@@ -1,19 +1,40 @@
+Metadata-Version: 2.4
+Name: createstate
+Version: 0.1.25
+Summary: Create State - Enterprise AI Code Intelligence Platform SDK
+Author-email: Create State <support@createstate.ai>
+Maintainer-email: Create State <support@createstate.ai>
+License-Expression: MIT
+Project-URL: Homepage, https://createstate.ai
+Project-URL: Documentation, https://createstate.ai/web/api
+Project-URL: Repository, https://github.com/Create-State/createstate-python
+Project-URL: Issues, https://github.com/Create-State/createstate-python/issues
+Keywords: ai,code-analysis,knowledge-graph,mcp,developer-tools,code-intelligence
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Software Development :: Libraries :: Python Modules
+Classifier: Topic :: Software Development :: Quality Assurance
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: httpx>=0.24.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.21.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: mypy>=1.0.0; extra == "dev"
+Requires-Dist: ruff>=0.1.0; extra == "dev"
+Dynamic: license-file
+
 # Create State Python SDK
 
-**Version 0.3.10** | Built 2026-03-11 | [createstate.ai](https://createstate.ai)
-
-
-
-
-
-
-
-
-
-
-
-
-
+**Version 0.1.25** | Built 2026-02-27 | [createstate.ai](https://createstate.ai)
 
 
 
@@ -363,25 +384,18 @@ After restoration, your AI has full context:
 Query your knowledge graph to find past decisions:
 
 ```bash
-# AI-powered conversation (uses your LLM to generate answers)
+# CLI - conversational queries
 create-state ask "why did we choose JWT for auth?"
 
-# Direct graph search (exact matches in knowledge graph)
+# Or structured queries
 create-state query "authentication decisions"
-
-# Semantic search (finds conceptually similar content)
-create-state search "how does login work"
+create-state search "why did we choose JWT"
 ```
 
 ```python
-# Python - Direct graph query
+# Python
 result = client.query_world_model("authentication classes")
-
-# Python - Semantic vector search
 results = client.search_knowledge("JWT decision rationale")
-
-# Python - AI-powered chat (requires BYOK or uses built-in Qwen)
-response = client.ask("why did we choose JWT for auth?")
 ```
 
 Get AI-generated insights:
@@ -495,9 +509,9 @@ Without `-v`, only the response is shown (no PARAMETERS section).
 | `capture context "..."` | Capture decisions or discussions |
 | `capture code <path>` | Capture code to knowledge graph (file or dir) |
 | `analyze <path>` | Analyze code (transient, use --capture to persist) |
-| `ask <question>` | Get AI-generated answers using your project context |
-| `query <terms>` | Search knowledge graph for matching files, decisions, insights |
-| `search <terms>` | Semantic search using vector similarity |
+| `ask <question>` | Ask questions about your project |
+| `query <query>` | Query the knowledge graph |
+| `search <query>` | Search captured knowledge semantically |
 | `insights` | Get AI-generated project insights |
 | `thinking` | Get autonomous background insights |
 | `synthesize` | Create comprehensive knowledge summary |
@@ -549,38 +563,19 @@ Options for `analyze`:
 - `--extensions` - Comma-separated file extensions
 - `--include-gitignored` - Include files that would be excluded by .gitignore
 
-**ask** - AI-powered Q&A using your configured LLM (BYOK provider or built-in Qwen):
+**ask** - Conversational interface for asking questions about your project:
 
 ```bash
 create-state ask "why did we choose Redis here?"
 create-state ask "what patterns do we use for error handling?"
-create-state ask "explain the authentication flow"
 ```
 
-The AI receives your full project context and generates a conversational response.
-This is equivalent to chatting in the web UI's world model chat panel.
-
-**query** - Direct graph search for code files, decisions, and captured insights:
+**query** - Structured queries against the knowledge graph:
 
 ```bash
-create-state query "authentication"           # Find auth-related nodes
-create-state query "payment processing"       # Search by keywords
-create-state query --code "middleware"        # Include code snippets in output
+create-state query "authentication classes"
+create-state query --code "payment processing"  # Include code snippets
 ```
-
-Returns exact matches from your knowledge graph: CodeEntities (files), Decisions,
-and Insights. Searches names, file paths, and descriptions. Fast and deterministic.
-
-**search** - Semantic search using vector embeddings for conceptual matching:
-
-```bash
-create-state search "how does login work"     # Finds auth-related content
-create-state search "error handling patterns" # Conceptual similarity
-```
-
-Unlike `query` (exact keyword matching), `search` uses AI embeddings to find
-content that is semantically similar to your query, even if it uses different
-terminology.
 
 ## Python API Reference
 

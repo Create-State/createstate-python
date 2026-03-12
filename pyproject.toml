@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "createstate"
-version = "0.1.25"
+version = "0.3.10"
 description = "Create State - Enterprise AI Code Intelligence Platform SDK"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
@@ -54,6 +54,7 @@ Homepage = "https://createstate.ai"
 Documentation = "https://createstate.ai/web/api"
 Repository = "https://github.com/Create-State/createstate-python"
 Issues = "https://github.com/Create-State/createstate-python/issues"
+License = "https://github.com/Create-State/createstate-python/blob/main/LICENSE"
 
 [project.scripts]
 create-state = "createstate.cli:main"
@@ -74,7 +75,7 @@ select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "0.1.25"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
