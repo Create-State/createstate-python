@@ -1,6 +1,6 @@
 # Create State Python SDK
 
-**Version 0.3.10** | Built 2026-03-11 | [createstate.ai](https://createstate.ai)
+**Version 0.6.0** | Built 2026-10-14 | [createstate.ai](https://createstate.ai)
 
 
 
@@ -106,6 +106,9 @@ create-state init --from-github https://github.com/owner/repo
 
 # Check status of your active model
 create-state status
+
+# Status with specific display mode (taste_topology, semantic_graph, conceptual_identity, integrated)
+create-state status --rendering-mode taste_topology
 
 # Capture your codebase to the knowledge graph
 create-state capture code ./src
@@ -499,7 +502,7 @@ Without `-v`, only the response is shown (no PARAMETERS section).
 | `init` | Initialize a world model for a project (sets as active) |
 | `models` | List your world models |
 | `use <name-or-id>` | Set active world model by name or ID |
-| `status` | Show active model status and context |
+| `status [--rendering-mode MODE]` | Show active model status and context |
 | `capture context "..."` | Capture decisions or discussions |
 | `capture code <path>` | Capture code to knowledge graph (file or dir) |
 | `analyze <path>` | Analyze code (transient, use --capture to persist) |
@@ -514,6 +517,27 @@ Without `-v`, only the response is shown (no PARAMETERS section).
 | `handoff restore <id>` | Restore from session handoff |
 | `auth github` | Connect/manage GitHub account |
 | `init --from-github <url>` | Import from GitHub repository |
+| | |
+| **Teams Tier Commands** | *Requires Teams or Enterprise subscription* |
+| `team list` | List teams you belong to |
+| `team create <name>` | Create a new team |
+| `team show <team-id>` | Show team details |
+| `team members <team-id>` | List team members |
+| `team invite <team-id> <email>` | Invite user to team |
+| `team remove <team-id> <user-id>` | Remove member from team |
+| `team role <team-id> <user-id> <role>` | Update member role |
+| `team projects <team-id>` | List team's shared projects |
+| `team share <team-id>` | Share active project with team |
+| `team unshare <team-id>` | Remove project sharing |
+| `team activity <team-id>` | View team activity feed |
+| `team pulse` | Get team activity overview |
+| `team expert <topic>` | Find team experts on a topic |
+| `team colleague <email>` | View colleague's recent activity |
+| `team stats <email>` | Get contributor statistics |
+| `team capacity` | Get/set project working capacity |
+| | |
+| **Image Commands** | *Capture visual assets to knowledge graph* |
+| `capture image <path>` | Capture image file to knowledge graph |
 
 ### GitHub Integration (NEW in v0.3.0)
 
@@ -648,6 +672,98 @@ Unlike `query` (exact keyword matching), `search` uses AI embeddings to find
 content that is semantically similar to your query, even if it uses different
 terminology.
 
+Add `--images` to search screenshots and diagrams by description, OCR text, or
+visual similarity:
+
+```bash
+create-state search --images "login screen"
+create-state search --images "architecture" --category diagram --mode semantic
+```
+
+**node** - Read or correct one knowledge node by the id that `search` printed:
+
+```bash
+create-state node read context_<uuid>
+create-state node update decision_<uuid> --type Decision --updates '{"status": "accepted"}'
+```
+
+`node read` prints the record to stdout. `node update` takes the new values as
+a JSON object of strings. Correcting an Entity's name or type retracts the old
+entity and prints the id of its successor.
+
+### Teams Commands (NEW in v0.4.0)
+
+Teams tier commands enable collaboration features. These require a Teams or
+Enterprise subscription.
+
+**team** - Manage teams and collaboration:
+
+```bash
+# List your teams
+create-state team list
+
+# Create a new team
+create-state team create "Backend Team" --description "API development"
+
+# Show team details
+create-state team show <team-id>
+
+# List team members
+create-state team members <team-id>
+
+# Invite a member (roles: owner, admin, member, viewer)
+create-state team invite <team-id> dev@example.com --role admin
+
+# Update member role
+create-state team role <team-id> <user-id> viewer
+
+# Remove a member
+create-state team remove <team-id> <user-id>
+```
+
+**team projects** - Share projects with teams:
+
+```bash
+# List projects shared with a team
+create-state team projects <team-id>
+
+# Share active project with a team
+create-state team share <team-id> --permission write
+
+# Share a specific model
+create-state team share <team-id> --model <model-id>
+
+# Remove project sharing
+create-state team unshare <team-id>
+create-state team unshare <team-id> --model <model-id>
+```
+
+**team intelligence** - Understand team activity:
+
+```bash
+# View team activity feed
+create-state team activity <team-id> --limit 20
+
+# Quick team overview
+create-state team pulse
+create-state team pulse --team <team-id>
+
+# Find experts on a topic
+create-state team expert "authentication"
+create-state team expert "database optimization" --team <team-id>
+
+# View colleague activity
+create-state team colleague dev@example.com --days 14
+
+# Get contributor stats for active project
+create-state team stats dev@example.com
+create-state team stats dev@example.com --model <model-id>
+
+# Get/set working capacity
+create-state team capacity                    # Show current
+create-state team capacity --set <team-id>    # Set to team
+```
+
 ## Python API Reference
 
 ### Client Initialization
@@ -698,8 +814,12 @@ result = client.analyze_directory(
 # Create
 model = client.create_world_model("my-app", "python", "Description")
 
-# Get context
+# Get context (auto-detects optimal display mode)
 context = client.get_world_model()
+
+# Get context with specific display mode
+# Options: taste_topology, semantic_graph, conceptual_identity, integrated
+context = client.get_world_model(rendering_mode="taste_topology")
 
 # Query
 result = client.query_world_model("authentication classes")
@@ -728,6 +848,46 @@ client.synthesize_context()
 
 # Search knowledge
 results = client.search_knowledge("payment processing")
+```
+
+### Image Capture (NEW)
+
+Capture screenshots, diagrams, and visual assets to your knowledge graph:
+
+```python
+# Capture an image file
+result = client.capture_image(
+    image_data=base64_encoded_data,
+    mime_type="image/png",
+    title="Architecture Diagram",
+    description="System architecture overview",
+    category="diagram",  # screenshot | diagram | asset | other
+    related_file_path="docs/architecture.md"  # Optional
+)
+print(f"Image ID: {result['image_id']}")
+
+# Search for images
+results = client.search_images(
+    query="authentication flow",
+    mode="hybrid",  # text | semantic | hybrid
+    category="diagram",  # Optional filter
+    limit=10
+)
+for img in results.get("results", []):
+    print(f"{img['title']}: {img['score']}%")
+```
+
+**CLI:**
+
+```bash
+# Capture an image file
+create-state capture image ./screenshots/error.png --title "Login Error"
+create-state capture image ./diagrams/arch.png --title "Architecture" --category diagram
+
+# Images are automatically processed with:
+# - Vision AI for description generation
+# - OCR for text extraction
+# - CLIP embeddings for semantic search
 ```
 
 ### Session Handoff
@@ -791,6 +951,132 @@ client.github_import_cancel(job["job_id"])
 
 # Disconnect GitHub
 client.github_disconnect()
+```
+
+### Teams Features (NEW in v0.4.0)
+
+Teams tier features enable collaboration across your organization. These methods
+require a Teams or Enterprise subscription.
+
+```python
+# =============================================================================
+# Team Management
+# =============================================================================
+
+# List teams you belong to
+teams = client.list_teams()
+for team in teams.get("teams", []):
+    print(f"{team['id']}: {team['name']}")
+
+# Create a new team
+team = client.create_team(
+    name="Backend Team",
+    description="API and services team"
+)
+print(f"Created team: {team['team_id']}")
+
+# Get team details
+details = client.get_team_details(team_id="team-123")
+
+# =============================================================================
+# Member Management
+# =============================================================================
+
+# List team members
+members = client.list_team_members(team_id="team-123")
+
+# Invite a user (roles: owner, admin, member, viewer)
+client.invite_to_team(
+    team_id="team-123",
+    email="dev@example.com",
+    role="member"  # Default role
+)
+
+# Update member role
+client.update_member_role(
+    team_id="team-123",
+    user_id="user-456",
+    role="admin"
+)
+
+# Remove member
+client.remove_team_member(team_id="team-123", user_id="user-456")
+
+# =============================================================================
+# Project Sharing
+# =============================================================================
+
+# Share a project with a team (permissions: read, write, admin)
+client.share_project_with_team(
+    team_id="team-123",
+    world_model_id="model-456",
+    world_model_name="My API Project",
+    permission="write"  # Default is "read"
+)
+
+# List projects shared with a team
+projects = client.list_team_projects(team_id="team-123")
+
+# Remove sharing
+client.unshare_project_from_team(
+    team_id="team-123",
+    world_model_id="model-456"
+)
+
+# =============================================================================
+# Working Capacity
+# =============================================================================
+
+# Get who's currently working on a project
+capacity = client.get_working_capacity(world_model_id="model-456")
+print(f"Current team: {capacity.get('team_name', 'Personal')}")
+
+# Set working capacity to a team
+client.set_working_capacity(
+    world_model_id="model-456",
+    team_id="team-123"  # Omit for personal capacity
+)
+
+# =============================================================================
+# Team Intelligence
+# =============================================================================
+
+# Get team activity feed
+activity = client.get_team_activity(team_id="team-123", limit=20)
+
+# Quick team overview (pulse)
+pulse = client.get_team_pulse(
+    team_id="team-123",      # Optional - filter by team
+    world_model_id="model-456"  # Optional - filter by project
+)
+
+# Find experts on a topic
+experts = client.find_topic_expert(
+    topic="authentication",
+    team_id="team-123"  # Optional - search within team
+)
+for expert in experts.get("experts", []):
+    print(f"{expert['name']}: {expert['expertise_score']}")
+
+# View colleague's recent activity
+activity = client.get_colleague_activity(
+    colleague_email="dev@example.com",
+    days=14  # Default is 7
+)
+
+# Get contributor statistics for a project
+stats = client.get_contributor_stats(
+    contributor_email="dev@example.com",
+    world_model_id="model-456"
+)
+
+# Search contributions by a specific person
+results = client.search_by_contributor(
+    contributor_email="dev@example.com",
+    entity_types=["code", "decision"],  # Optional filter
+    start_date="2026-01-01",            # Optional
+    limit=50
+)
 ```
 
 ## Error Handling

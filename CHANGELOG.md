@@ -6,6 +6,59 @@ file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-14
+
+### Added
+- **Node tools** - Read and correct one knowledge node by id
+  - `client.read_node(node_id, model_id="", node_type="")` calls `readNode`
+  - `client.update_node(model_id, node_id, node_type, updates)` calls `updateNode`
+  - `create-state node read <node_id> [--type T] [--model-id M]`
+  - `create-state node update <node_id> --type T --updates '{"field": "value"}'`
+  - Correcting an Entity's name or type retracts the old entity and returns
+    the id of its successor
+- **Image search on the CLI** - `create-state search --images <query>` calls
+  `searchImages`, with `--mode` (text, semantic, hybrid) and `--category`
+- **Batch image capture** - `client.capture_image_batch()` and
+  `create-state capture images <paths...>` (up to 50 images)
+
+### Security
+- General security hardening. Upgrading is recommended
+
+## [0.5.0] - 2026-06-05
+
+### Added
+- **Image Capture** - Save screenshots, diagrams, and visual assets to knowledge graph
+  - `create-state capture image <path>` - Capture image file
+  - `--title` - Set image title (required)
+  - `--description` - Add image description
+  - `--category` - Categorize as screenshot, diagram, asset, or other
+- Python SDK image methods:
+  - `client.capture_image()` - Capture image with base64 data
+  - `client.search_images()` - Search images by description or visual similarity
+- **Image Intelligence** - Uploaded images are automatically processed with:
+  - Vision AI for generating descriptions and tags
+  - OCR for extracting visible text from screenshots
+  - CLIP embeddings for semantic visual search
+- **Hybrid Image Search** - Search images using text, semantic similarity, or both
+
+### Changed
+- Images are validated, re-encoded, and stripped of EXIF metadata for security
+- Content moderation automatically flags inappropriate uploads
+
+## [0.4.0] - 2026-04-17
+
+### Added
+- **Teams** (Teams or Enterprise tier)
+  - `create-state team list | create | show | members` - Manage teams
+  - `create-state team invite | remove | role` - Manage members and roles
+  - `create-state team projects | share | unshare` - Share world models
+  - `create-state team activity | pulse | expert | colleague | stats` - Team
+    intelligence
+  - `create-state team capacity` - Show or set working capacity
+- Python SDK team methods for the same operations, including
+  `create_team()`, `invite_to_team()`, `update_member_role()`,
+  `share_project_with_team()`, and `set_working_capacity()`
+
 ## [0.3.10] - 2026-03-11
 
 ### Added

@@ -40,6 +40,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Dict, Optional
 
 from .client import CreateStateClient
 from .exceptions import AuthenticationError, CreateStateError
@@ -1488,9 +1489,11 @@ def cmd_status(args: argparse.Namespace) -> int:
                     break
 
         # Get world model context using model_id
+        rendering_mode = getattr(args, "rendering_mode", None) or ""
         result = client.get_world_model(
             model_id=model_id,
             include_insights=True,
+            rendering_mode=rendering_mode,
         )
 
         # Check if response indicates model not found
@@ -1705,6 +1708,8 @@ def cmd_search(args: argparse.Namespace) -> int:
         return 1
 
     model_name = active.get("name", "Unknown")
+    if getattr(args, "images", False) is True:
+        return _search_images(args, query, active)
     print(dim(f"# Searching {model_name}: {query}"))
 
     client = get_client()
@@ -1736,6 +1741,107 @@ def cmd_search(args: argparse.Namespace) -> int:
         return 1
 
     return 0
+
+
+def _search_images(args: argparse.Namespace, query: str, active: dict) -> int:
+    """Search images in the active world model and print the result.
+
+    Args:
+        args: Parsed arguments with limit, mode, and category.
+        query: Search text.
+        active: Active model from config.
+
+    Returns:
+        Process exit code.
+    """
+    model_id = active.get("id", "")
+    limit = args.limit or 10
+    mode = getattr(args, "mode", None) or "hybrid"
+    category = getattr(args, "category", None) or ""
+    print(dim(f"# Searching images in {active.get('name', 'Unknown')}: {query}"))
+    try:
+        result = get_client().search_images(
+            query=query,
+            model_id=model_id,
+            mode=mode,
+            category=category,
+            limit=limit,
+        )
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+    print_response(result)
+    if is_verbose():
+        print_parameters(
+            {"query": query, "mode": mode, "limit": limit, "model_id": model_id}
+        )
+    return 0
+
+
+def _parse_updates(raw: str) -> Optional[Dict[str, str]]:
+    """Parse the --updates JSON object for node update.
+
+    The value is parsed as data only. It is never passed to a shell.
+
+    Args:
+        raw: JSON text from argv.
+
+    Returns:
+        A mapping of field names to string values, or None if invalid.
+    """
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict) or not parsed:
+        return None
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()):
+        return None
+    return parsed
+
+
+def cmd_node_read(args: argparse.Namespace) -> int:
+    """Read one knowledge node by id and print it to stdout."""
+    active = get_active_model()
+    try:
+        result = get_client().read_node(
+            node_id=args.node_id,
+            model_id=args.model_id or active.get("id", ""),
+            node_type=args.type or "",
+        )
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+    print_response(result)
+    return 1 if result.get("isError") else 0
+
+
+def cmd_node_update(args: argparse.Namespace) -> int:
+    """Correct fields on one knowledge node."""
+    updates = _parse_updates(args.updates)
+    if updates is None:
+        print(
+            red("[ERROR]")
+            + ' --updates must be a JSON object of strings, e.g. \'{"status": "accepted"}\''
+        )
+        return 1
+    model_id = args.model_id or get_active_model().get("id", "")
+    if not model_id:
+        print(red("[ERROR]") + " No active world model. Pass --model-id or run:")
+        print(f"  {cyan('create-state use <model>')}")
+        return 1
+    try:
+        result = get_client().update_node(
+            model_id=model_id,
+            node_id=args.node_id,
+            node_type=args.type,
+            updates=updates,
+        )
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+    print_response(result)
+    return 1 if result.get("isError") else 0
 
 
 def cmd_handoff_create(args: argparse.Namespace) -> int:
@@ -2139,6 +2245,732 @@ def cmd_capture_code(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_capture_image(args: argparse.Namespace) -> int:
+    """Capture an image to the knowledge graph."""
+    import base64
+
+    image_path = Path(args.path)
+
+    if not image_path.exists():
+        print(red("[ERROR]") + f" Image not found: {args.path}")
+        return 1
+
+    if not image_path.is_file():
+        print(red("[ERROR]") + f" Not a file: {args.path}")
+        return 1
+
+    # Check for active model
+    active = get_active_model()
+    if not active.get("id"):
+        print(red("[ERROR]") + " No active world model.")
+        print()
+        cmd1 = cyan("create-state init --name 'My Project'")
+        cmd2 = cyan("create-state use <model>")
+        print(f"First create or select a model: {cmd1}")
+        print(f"Or select an existing one: {cmd2}")
+        return 1
+
+    model_id = active.get("id", "")
+    model_name = active.get("name", "Unknown")
+
+    # Detect MIME type
+    suffix = image_path.suffix.lower()
+    mime_map = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }
+    mime_type = mime_map.get(suffix)
+    if not mime_type:
+        print(red("[ERROR]") + f" Unsupported image format: {suffix}")
+        print("Supported formats: PNG, JPEG, GIF, WebP")
+        return 1
+
+    # Read and encode image
+    print(dim(f"# Capturing {image_path.name} to {model_name}..."))
+
+    try:
+        with open(image_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+    except Exception as e:
+        print(red("[ERROR]") + f" Could not read image: {e}")
+        return 1
+
+    # Check file size (max 20MB)
+    size_mb = len(image_data) * 3 / 4 / 1024 / 1024  # Approximate decoded size
+    if size_mb > 20:
+        print(red("[ERROR]") + f" Image too large: {size_mb:.1f}MB (max 20MB)")
+        return 1
+
+    title = args.title or image_path.stem
+    description = args.description or ""
+    category = args.category or "other"
+
+    client = get_client()
+
+    try:
+        result = client.capture_image(
+            image_data=image_data,
+            mime_type=mime_type,
+            title=title,
+            description=description,
+            category=category,
+            model_id=model_id,
+        )
+
+        print(green("[OK]") + f" Captured: {image_path.name}")
+        print(f"     Title: {title}")
+        print(f"     Category: {category}")
+
+        if is_verbose():
+            print()
+            print_response(result)
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_capture_images(args: argparse.Namespace) -> int:
+    """Capture multiple images to the knowledge graph."""
+    import base64
+
+    paths = [Path(p) for p in args.paths]
+
+    # Validate all paths exist
+    for path in paths:
+        if not path.exists():
+            print(red("[ERROR]") + f" Image not found: {path}")
+            return 1
+        if not path.is_file():
+            print(red("[ERROR]") + f" Not a file: {path}")
+            return 1
+
+    # Check for active model
+    active = get_active_model()
+    if not active.get("id"):
+        print(red("[ERROR]") + " No active world model.")
+        print()
+        cmd1 = cyan("create-state init --name 'My Project'")
+        cmd2 = cyan("create-state use <model>")
+        print(f"First create or select a model: {cmd1}")
+        print(f"Or select an existing one: {cmd2}")
+        return 1
+
+    model_id = active.get("id", "")
+    model_name = active.get("name", "Unknown")
+
+    # Prepare images
+    images = []
+    mime_map = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }
+
+    print(dim(f"# Preparing {len(paths)} images for {model_name}..."))
+
+    skipped = 0
+    for path in paths:
+        mime_type = mime_map.get(path.suffix.lower())
+        if not mime_type:
+            print(yellow("[SKIP]") + f" Unsupported format: {path}")
+            skipped += 1
+            continue
+
+        try:
+            with open(path, "rb") as f:
+                image_data = base64.b64encode(f.read()).decode("utf-8")
+
+            # Check file size (max 10MB per image)
+            size_mb = len(image_data) * 3 / 4 / 1024 / 1024
+            if size_mb > 10:
+                print(yellow("[SKIP]") + f" Too large ({size_mb:.1f}MB): {path}")
+                skipped += 1
+                continue
+
+            images.append(
+                {
+                    "image_data": image_data,
+                    "mime_type": mime_type,
+                    "title": path.stem,
+                }
+            )
+        except Exception as e:
+            print(yellow("[SKIP]") + f" Could not read {path}: {e}")
+            skipped += 1
+
+    if not images:
+        print(red("[ERROR]") + " No valid images to capture")
+        return 1
+
+    client = get_client()
+    category = args.category or "other"
+
+    print(dim(f"# Uploading {len(images)} images..."))
+
+    try:
+        result = client.capture_image_batch(
+            images=images,
+            default_category=category,
+            model_id=model_id,
+        )
+
+        succeeded = result.get("succeeded", 0)
+        failed = result.get("failed", 0)
+        total = result.get("total", len(images))
+
+        if failed == 0:
+            print(green("[OK]") + f" Captured {succeeded} images")
+        else:
+            print(yellow("[PARTIAL]") + f" Captured {succeeded} of {total} images")
+            print(f"     Failed: {failed}")
+
+        if skipped > 0:
+            print(f"     Skipped: {skipped} (invalid format or size)")
+
+        # Show quota if near limit
+        quota = result.get("quota_remaining")
+        if quota is not None and quota >= 0 and quota < 100:
+            print(yellow("[INFO]") + f" Image quota remaining: {quota}")
+
+        if is_verbose():
+            print()
+            print_response(result)
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+# =============================================================================
+# Team Commands (Teams/Enterprise Tier)
+# =============================================================================
+
+
+def cmd_team_list(args: argparse.Namespace) -> int:
+    """List teams you belong to."""
+    print(dim("# Listing your teams..."))
+
+    client = get_client()
+
+    try:
+        result = client.list_teams()
+        print_response(result)
+
+        if is_verbose():
+            print_parameters({})
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_create(args: argparse.Namespace) -> int:
+    """Create a new team."""
+    name = args.name
+    description = args.description or ""
+
+    print(dim(f"# Creating team: {name}"))
+
+    client = get_client()
+
+    try:
+        result = client.create_team(
+            name=name,
+            description=description,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "name": name,
+                    "description": description,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_show(args: argparse.Namespace) -> int:
+    """Show team details."""
+    team_id = args.team_id
+
+    print(dim(f"# Getting team details..."))
+
+    client = get_client()
+
+    try:
+        result = client.get_team_details(team_id=team_id)
+        print_response(result)
+
+        if is_verbose():
+            print_parameters({"team_id": team_id})
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_members(args: argparse.Namespace) -> int:
+    """List team members."""
+    team_id = args.team_id
+
+    print(dim(f"# Listing team members..."))
+
+    client = get_client()
+
+    try:
+        result = client.list_team_members(team_id=team_id)
+        print_response(result)
+
+        if is_verbose():
+            print_parameters({"team_id": team_id})
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_invite(args: argparse.Namespace) -> int:
+    """Invite a user to join a team."""
+    team_id = args.team_id
+    email = args.email
+    role = args.role or "member"
+
+    print(dim(f"# Inviting {email} to team as {role}..."))
+
+    client = get_client()
+
+    try:
+        result = client.invite_to_team(
+            team_id=team_id,
+            email=email,
+            role=role,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "team_id": team_id,
+                    "email": email,
+                    "role": role,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_remove(args: argparse.Namespace) -> int:
+    """Remove a member from a team."""
+    team_id = args.team_id
+    user_id = args.user_id
+
+    print(dim(f"# Removing member from team..."))
+
+    client = get_client()
+
+    try:
+        result = client.remove_team_member(
+            team_id=team_id,
+            user_id=user_id,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "team_id": team_id,
+                    "user_id": user_id,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_role(args: argparse.Namespace) -> int:
+    """Update a team member's role."""
+    team_id = args.team_id
+    user_id = args.user_id
+    role = args.role
+
+    print(dim(f"# Updating member role to {role}..."))
+
+    client = get_client()
+
+    try:
+        result = client.update_member_role(
+            team_id=team_id,
+            user_id=user_id,
+            role=role,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "team_id": team_id,
+                    "user_id": user_id,
+                    "role": role,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_projects(args: argparse.Namespace) -> int:
+    """List projects shared with a team."""
+    team_id = args.team_id
+
+    print(dim(f"# Listing team projects..."))
+
+    client = get_client()
+
+    try:
+        result = client.list_team_projects(team_id=team_id)
+        print_response(result)
+
+        if is_verbose():
+            print_parameters({"team_id": team_id})
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_share(args: argparse.Namespace) -> int:
+    """Share a project with a team."""
+    team_id = args.team_id
+    permission = args.permission or "read"
+
+    # Get active model if not specified
+    active = get_active_model()
+    model_id = args.model or active.get("id", "")
+    model_name = active.get("name", "")
+
+    if not model_id:
+        print(red("[ERROR]") + " No project specified and no active world model.")
+        print()
+        cmd1 = cyan("create-state use <model>")
+        cmd2 = cyan("--model <model-id>")
+        print(f"First select a model: {cmd1}")
+        print(f"Or specify one: {cmd2}")
+        return 1
+
+    print(dim(f"# Sharing {model_name or model_id} with team ({permission})..."))
+
+    client = get_client()
+
+    try:
+        result = client.share_project_with_team(
+            team_id=team_id,
+            world_model_id=model_id,
+            world_model_name=model_name,
+            permission=permission,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "team_id": team_id,
+                    "world_model_id": model_id,
+                    "permission": permission,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_unshare(args: argparse.Namespace) -> int:
+    """Remove project sharing from a team."""
+    team_id = args.team_id
+
+    # Get active model if not specified
+    active = get_active_model()
+    model_id = args.model or active.get("id", "")
+
+    if not model_id:
+        print(red("[ERROR]") + " No project specified and no active world model.")
+        return 1
+
+    print(dim(f"# Removing project from team..."))
+
+    client = get_client()
+
+    try:
+        result = client.unshare_project_from_team(
+            team_id=team_id,
+            world_model_id=model_id,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "team_id": team_id,
+                    "world_model_id": model_id,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_activity(args: argparse.Namespace) -> int:
+    """Get team activity log."""
+    team_id = args.team_id
+    limit = args.limit or 20
+
+    print(dim(f"# Getting team activity..."))
+
+    client = get_client()
+
+    try:
+        result = client.get_team_activity(
+            team_id=team_id,
+            limit=limit,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "team_id": team_id,
+                    "limit": limit,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_pulse(args: argparse.Namespace) -> int:
+    """Get team pulse overview."""
+    team_id = getattr(args, "team_id", None) or ""
+
+    # Optional: filter by project
+    active = get_active_model()
+    model_id = getattr(args, "model", None) or ""
+
+    print(dim(f"# Getting team pulse..."))
+
+    client = get_client()
+
+    try:
+        result = client.get_team_pulse(
+            team_id=team_id,
+            world_model_id=model_id,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "team_id": team_id,
+                    "world_model_id": model_id,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_expert(args: argparse.Namespace) -> int:
+    """Find experts on a topic."""
+    topic = " ".join(args.topic)
+    team_id = getattr(args, "team_id", None) or ""
+
+    if not topic:
+        print(red("[ERROR]") + " Please provide a topic")
+        return 1
+
+    print(dim(f"# Finding experts on: {topic}"))
+
+    client = get_client()
+
+    try:
+        result = client.find_topic_expert(
+            topic=topic,
+            team_id=team_id,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "topic": topic,
+                    "team_id": team_id,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_colleague(args: argparse.Namespace) -> int:
+    """Get colleague activity."""
+    email = args.email
+    days = args.days or 7
+
+    print(dim(f"# Getting activity for {email}..."))
+
+    client = get_client()
+
+    try:
+        result = client.get_colleague_activity(
+            colleague_email=email,
+            days=days,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "colleague_email": email,
+                    "days": days,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_stats(args: argparse.Namespace) -> int:
+    """Get contributor statistics."""
+    email = args.email
+
+    # Optional: filter by project
+    active = get_active_model()
+    model_id = getattr(args, "model", None) or ""
+
+    print(dim(f"# Getting stats for {email}..."))
+
+    client = get_client()
+
+    try:
+        result = client.get_contributor_stats(
+            contributor_email=email,
+            world_model_id=model_id,
+        )
+        print_response(result)
+
+        if is_verbose():
+            print_parameters(
+                {
+                    "contributor_email": email,
+                    "world_model_id": model_id,
+                }
+            )
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
+def cmd_team_capacity(args: argparse.Namespace) -> int:
+    """Get or set working capacity for a project."""
+    # Get active model if not specified
+    active = get_active_model()
+    model_id = getattr(args, "model", None) or active.get("id", "")
+    model_name = active.get("name", "")
+
+    if not model_id:
+        print(red("[ERROR]") + " No project specified and no active world model.")
+        return 1
+
+    # Check if setting or getting
+    team_id = getattr(args, "set_team", None)
+
+    client = get_client()
+
+    try:
+        if team_id is not None:
+            # Setting capacity
+            if team_id == "":
+                print(dim(f"# Setting to personal capacity for {model_name}..."))
+            else:
+                print(dim(f"# Setting working capacity for {model_name}..."))
+
+            result = client.set_working_capacity(
+                world_model_id=model_id,
+                team_id=team_id if team_id else None,
+            )
+        else:
+            # Getting capacity
+            print(dim(f"# Getting working capacity for {model_name or model_id}..."))
+            result = client.get_working_capacity(world_model_id=model_id)
+
+        print_response(result)
+
+        if is_verbose():
+            params = {"world_model_id": model_id}
+            if team_id is not None:
+                params["team_id"] = team_id
+            print_parameters(params)
+
+    except CreateStateError as e:
+        print(red("[ERROR]") + f" {e}")
+        return 1
+
+    return 0
+
+
 def cmd_version(args: argparse.Namespace) -> int:
     """Show version information."""
     from . import __version__
@@ -2160,7 +2992,7 @@ Examples:
   create-state use "My App"               Switch by name (or partial ID)
   create-state status                     Show active model status
 
-  # GitHub integration (NEW)
+  # GitHub integration
   create-state auth github                Connect your GitHub account
   create-state init --from-github <url>   Import from GitHub repository
   create-state init --from-github <url> --branch dev   Import specific branch
@@ -2178,6 +3010,14 @@ Examples:
   create-state synthesize                 Create AINOTES-style summary
   create-state handoff create             Save session for continuity
   create-state configure                  Set up your API key
+
+  # Team commands (Teams/Enterprise tier)
+  create-state team list                  List your teams
+  create-state team create "Backend"      Create a new team
+  create-state team invite <id> email     Invite member to team
+  create-state team share <id>            Share project with team
+  create-state team pulse                 Team activity overview
+  create-state team expert "auth"         Find topic experts
 
 Get your API key at: https://createstate.ai/web/api-keys
         """,
@@ -2348,6 +3188,16 @@ Examples:
         "status",
         help="Show active model status and context",
     )
+    status_parser.add_argument(
+        "--rendering-mode",
+        choices=[
+            "taste_topology",
+            "semantic_graph",
+            "conceptual_identity",
+            "integrated",
+        ],
+        help="Display mode: taste_topology (reviews), semantic_graph (code), conceptual_identity (research), integrated (default)",
+    )
     status_parser.set_defaults(func=cmd_status)
 
     # capture command (subcommands)
@@ -2413,6 +3263,58 @@ Examples:
         help="Include files that would be excluded by .gitignore",
     )
     capture_code_parser.set_defaults(func=cmd_capture_code)
+
+    # capture image
+    capture_image_parser = capture_subparsers.add_parser(
+        "image",
+        help="Capture an image to knowledge graph (screenshot, diagram, etc.)",
+    )
+    capture_image_parser.add_argument(
+        "path",
+        type=str,
+        help="Path to the image file (PNG, JPEG, GIF, or WebP)",
+    )
+    capture_image_parser.add_argument(
+        "--title",
+        "-t",
+        type=str,
+        help="Image title (defaults to filename)",
+    )
+    capture_image_parser.add_argument(
+        "--description",
+        "-d",
+        type=str,
+        help="Description of what the image shows",
+    )
+    capture_image_parser.add_argument(
+        "--category",
+        "-c",
+        type=str,
+        choices=["screenshot", "diagram", "asset", "other"],
+        default="other",
+        help="Image category (default: other)",
+    )
+    capture_image_parser.set_defaults(func=cmd_capture_image)
+
+    # capture images (batch)
+    capture_images_parser = capture_subparsers.add_parser(
+        "images",
+        help="Capture multiple images to knowledge graph (batch upload)",
+    )
+    capture_images_parser.add_argument(
+        "paths",
+        nargs="+",
+        help="Paths to image files (PNG, JPEG, GIF, or WebP)",
+    )
+    capture_images_parser.add_argument(
+        "--category",
+        "-c",
+        type=str,
+        choices=["screenshot", "diagram", "asset", "other"],
+        default="other",
+        help="Category for all images (default: other)",
+    )
+    capture_images_parser.set_defaults(func=cmd_capture_images)
 
     # query command - graph search
     query_parser = subparsers.add_parser(
@@ -2496,7 +3398,74 @@ Examples:
         default=10,
         help="Maximum results to return (default: 10)",
     )
+    search_parser.add_argument(
+        "--images",
+        action="store_true",
+        help="Search images (descriptions, OCR text, visual similarity)",
+    )
+    search_parser.add_argument(
+        "--mode",
+        choices=["text", "semantic", "hybrid"],
+        default="hybrid",
+        help="Image search mode, used with --images (default: hybrid)",
+    )
+    search_parser.add_argument(
+        "--category",
+        choices=["screenshot", "diagram", "asset", "other"],
+        help="Image category filter, used with --images",
+    )
     search_parser.set_defaults(func=cmd_search)
+
+    # node command (subcommands)
+    node_parser = subparsers.add_parser(
+        "node",
+        help="Read or correct one knowledge node by id",
+        description=(
+            "Read one node by the id that 'search' printed, or correct its "
+            "fields. Output goes to stdout."
+        ),
+    )
+    node_parser.set_defaults(func=lambda _args: node_parser.print_help() or 0)
+    node_subparsers = node_parser.add_subparsers(dest="node_command")
+    node_types = [
+        "Context",
+        "Decision",
+        "Insight",
+        "CodeEntity",
+        "Entity",
+        "Alternative",
+        "Motivation",
+        "Requirement",
+    ]
+
+    node_read_parser = node_subparsers.add_parser(
+        "read", help="Print one node's identity record"
+    )
+    node_read_parser.add_argument("node_id", help="Node id (e.g. context_<uuid>)")
+    node_read_parser.add_argument(
+        "--type", choices=node_types + ["KnowledgeEntity"], help="Node label"
+    )
+    node_read_parser.add_argument(
+        "--model-id", dest="model_id", help="World model id (default: active)"
+    )
+    node_read_parser.set_defaults(func=cmd_node_read)
+
+    node_update_parser = node_subparsers.add_parser(
+        "update", help="Correct fields on one node"
+    )
+    node_update_parser.add_argument("node_id", help="Node id to update")
+    node_update_parser.add_argument(
+        "--type", required=True, choices=node_types, help="Node type"
+    )
+    node_update_parser.add_argument(
+        "--updates",
+        required=True,
+        help='JSON object of field names to strings, e.g. \'{"status": "accepted"}\'',
+    )
+    node_update_parser.add_argument(
+        "--model-id", dest="model_id", help="World model id (default: active)"
+    )
+    node_update_parser.set_defaults(func=cmd_node_update)
 
     # handoff command (subcommands)
     handoff_parser = subparsers.add_parser(
@@ -2608,6 +3577,290 @@ Examples:
         help="Project path (default: current directory)",
     )
     synthesize_parser.set_defaults(func=cmd_synthesize)
+
+    # =========================================================================
+    # Team commands (Teams/Enterprise Tier)
+    # =========================================================================
+    team_parser = subparsers.add_parser(
+        "team",
+        help="Team management (Teams/Enterprise tier)",
+        description="Manage teams, members, and shared projects.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  create-state team list                  List your teams
+  create-state team create "Backend"      Create a new team
+  create-state team show <team-id>        Show team details
+  create-state team members <team-id>     List team members
+  create-state team invite <team-id> dev@example.com   Invite a member
+  create-state team projects <team-id>    List shared projects
+  create-state team share <team-id>       Share current project with team
+  create-state team pulse                 Get team activity overview
+  create-state team expert "authentication"  Find experts on a topic
+  create-state team colleague dev@example.com  See colleague's activity
+  create-state team capacity              Show working capacity options
+
+Requires Teams or Enterprise tier subscription.
+        """,
+    )
+    team_parser.set_defaults(func=cmd_team_list)  # Default: list teams
+    team_subparsers = team_parser.add_subparsers(dest="team_command")
+
+    # team list
+    team_list_parser = team_subparsers.add_parser(
+        "list",
+        help="List teams you belong to",
+    )
+    team_list_parser.set_defaults(func=cmd_team_list)
+
+    # team create
+    team_create_parser = team_subparsers.add_parser(
+        "create",
+        help="Create a new team",
+    )
+    team_create_parser.add_argument(
+        "name",
+        help="Team name (3-100 characters)",
+    )
+    team_create_parser.add_argument(
+        "--description",
+        "-d",
+        help="Team description",
+    )
+    team_create_parser.set_defaults(func=cmd_team_create)
+
+    # team show
+    team_show_parser = team_subparsers.add_parser(
+        "show",
+        help="Show team details",
+    )
+    team_show_parser.add_argument(
+        "team_id",
+        help="Team ID",
+    )
+    team_show_parser.set_defaults(func=cmd_team_show)
+
+    # team members
+    team_members_parser = team_subparsers.add_parser(
+        "members",
+        help="List team members",
+    )
+    team_members_parser.add_argument(
+        "team_id",
+        help="Team ID",
+    )
+    team_members_parser.set_defaults(func=cmd_team_members)
+
+    # team invite
+    team_invite_parser = team_subparsers.add_parser(
+        "invite",
+        help="Invite a user to the team",
+    )
+    team_invite_parser.add_argument(
+        "team_id",
+        help="Team ID",
+    )
+    team_invite_parser.add_argument(
+        "email",
+        help="Email address to invite",
+    )
+    team_invite_parser.add_argument(
+        "--role",
+        "-r",
+        choices=["admin", "member", "viewer"],
+        default="member",
+        help="Role to assign (default: member)",
+    )
+    team_invite_parser.set_defaults(func=cmd_team_invite)
+
+    # team remove
+    team_remove_parser = team_subparsers.add_parser(
+        "remove",
+        help="Remove a member from the team",
+    )
+    team_remove_parser.add_argument(
+        "team_id",
+        help="Team ID",
+    )
+    team_remove_parser.add_argument(
+        "user_id",
+        help="User ID to remove",
+    )
+    team_remove_parser.set_defaults(func=cmd_team_remove)
+
+    # team role
+    team_role_parser = team_subparsers.add_parser(
+        "role",
+        help="Update a member's role",
+    )
+    team_role_parser.add_argument(
+        "team_id",
+        help="Team ID",
+    )
+    team_role_parser.add_argument(
+        "user_id",
+        help="User ID to update",
+    )
+    team_role_parser.add_argument(
+        "role",
+        choices=["admin", "member", "viewer"],
+        help="New role",
+    )
+    team_role_parser.set_defaults(func=cmd_team_role)
+
+    # team projects
+    team_projects_parser = team_subparsers.add_parser(
+        "projects",
+        help="List projects shared with a team",
+    )
+    team_projects_parser.add_argument(
+        "team_id",
+        help="Team ID",
+    )
+    team_projects_parser.set_defaults(func=cmd_team_projects)
+
+    # team share
+    team_share_parser = team_subparsers.add_parser(
+        "share",
+        help="Share a project with a team",
+    )
+    team_share_parser.add_argument(
+        "team_id",
+        help="Team ID to share with",
+    )
+    team_share_parser.add_argument(
+        "--model",
+        "-m",
+        help="World model ID (default: active model)",
+    )
+    team_share_parser.add_argument(
+        "--permission",
+        "-p",
+        choices=["read", "write", "admin"],
+        default="read",
+        help="Permission level (default: read)",
+    )
+    team_share_parser.set_defaults(func=cmd_team_share)
+
+    # team unshare
+    team_unshare_parser = team_subparsers.add_parser(
+        "unshare",
+        help="Remove project sharing from a team",
+    )
+    team_unshare_parser.add_argument(
+        "team_id",
+        help="Team ID",
+    )
+    team_unshare_parser.add_argument(
+        "--model",
+        "-m",
+        help="World model ID (default: active model)",
+    )
+    team_unshare_parser.set_defaults(func=cmd_team_unshare)
+
+    # team activity
+    team_activity_parser = team_subparsers.add_parser(
+        "activity",
+        help="Get team activity log",
+    )
+    team_activity_parser.add_argument(
+        "team_id",
+        help="Team ID",
+    )
+    team_activity_parser.add_argument(
+        "--limit",
+        "-l",
+        type=int,
+        default=20,
+        help="Maximum activities (default: 20)",
+    )
+    team_activity_parser.set_defaults(func=cmd_team_activity)
+
+    # team pulse
+    team_pulse_parser = team_subparsers.add_parser(
+        "pulse",
+        help="Get team pulse overview",
+    )
+    team_pulse_parser.add_argument(
+        "--team-id",
+        "-t",
+        help="Team ID (optional filter)",
+    )
+    team_pulse_parser.add_argument(
+        "--model",
+        "-m",
+        help="World model ID (optional filter)",
+    )
+    team_pulse_parser.set_defaults(func=cmd_team_pulse)
+
+    # team expert
+    team_expert_parser = team_subparsers.add_parser(
+        "expert",
+        help="Find experts on a topic",
+    )
+    team_expert_parser.add_argument(
+        "topic",
+        nargs="+",
+        help="Topic to find experts for (e.g., 'authentication')",
+    )
+    team_expert_parser.add_argument(
+        "--team-id",
+        "-t",
+        help="Team ID (optional filter)",
+    )
+    team_expert_parser.set_defaults(func=cmd_team_expert)
+
+    # team colleague
+    team_colleague_parser = team_subparsers.add_parser(
+        "colleague",
+        help="Get a colleague's recent activity",
+    )
+    team_colleague_parser.add_argument(
+        "email",
+        help="Colleague's email address",
+    )
+    team_colleague_parser.add_argument(
+        "--days",
+        "-d",
+        type=int,
+        default=7,
+        help="Days to look back (default: 7)",
+    )
+    team_colleague_parser.set_defaults(func=cmd_team_colleague)
+
+    # team stats
+    team_stats_parser = team_subparsers.add_parser(
+        "stats",
+        help="Get contributor statistics",
+    )
+    team_stats_parser.add_argument(
+        "email",
+        help="Contributor's email address",
+    )
+    team_stats_parser.add_argument(
+        "--model",
+        "-m",
+        help="World model ID (optional filter)",
+    )
+    team_stats_parser.set_defaults(func=cmd_team_stats)
+
+    # team capacity
+    team_capacity_parser = team_subparsers.add_parser(
+        "capacity",
+        help="Get or set working capacity for a project",
+    )
+    team_capacity_parser.add_argument(
+        "--model",
+        "-m",
+        help="World model ID (default: active model)",
+    )
+    team_capacity_parser.add_argument(
+        "--set-team",
+        "-s",
+        metavar="TEAM_ID",
+        help="Set working capacity to this team (empty string for personal)",
+    )
+    team_capacity_parser.set_defaults(func=cmd_team_capacity)
 
     # version command
     version_parser = subparsers.add_parser(

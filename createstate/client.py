@@ -325,6 +325,7 @@ class CreateStateClient:
         project_path: str = "",
         model_id: str = "",
         include_insights: bool = True,
+        rendering_mode: str = "",
     ) -> Dict[str, Any]:
         """
         Get project world model context (AINOTES-style summary).
@@ -333,6 +334,8 @@ class CreateStateClient:
             project_path: Path to project directory (for lookup by path/name)
             model_id: Direct model ID (preferred if known)
             include_insights: Include recent insights and recommendations
+            rendering_mode: Display mode optimization (taste_topology, semantic_graph,
+                          conceptual_identity, integrated). Auto-detected if not specified.
 
         Returns:
             Project context including architecture, key files, priorities
@@ -342,6 +345,8 @@ class CreateStateClient:
             params["model_id"] = model_id
         if project_path:
             params["project_path"] = project_path
+        if rendering_mode:
+            params["rendering_mode"] = rendering_mode
         return self._mcp_call("getProjectWorldModel", params)
 
     def query_world_model(
@@ -548,6 +553,247 @@ class CreateStateClient:
         if model_id:
             params["project_id"] = model_id
         return self._mcp_call("searchProjectKnowledge", params)
+
+    def read_node(
+        self,
+        node_id: str,
+        model_id: str = "",
+        node_type: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Read one knowledge node by the id that search_knowledge printed.
+
+        The server checks access before it reads. A node that does not exist
+        and a node in a model you cannot read return the same error. The
+        record is returned to the caller and is not written to disk.
+
+        Args:
+            node_id: Node id, bare or prefixed (context_<uuid>, entity_<uuid>)
+            model_id: World model ID (defaults to the active model)
+            node_type: Optional label such as Context, Decision, or Entity
+
+        Returns:
+            MCP result whose text is one JSON identity record
+
+        Raises:
+            ValidationError: If node_id is empty
+
+        Example:
+            >>> hits = client.search_knowledge("retry policy")
+            >>> record = client.read_node("context_3f2a...", model_id="...")
+        """
+        if not node_id or not node_id.strip():
+            raise ValidationError("node_id is required", field="node_id")
+        params: Dict[str, Any] = {"node_id": node_id.strip()}
+        if model_id:
+            params["model_id"] = model_id
+        if node_type:
+            params["node_type"] = node_type
+        return self._mcp_call("readNode", params)
+
+    def update_node(
+        self,
+        model_id: str,
+        node_id: str,
+        node_type: str,
+        updates: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """
+        Correct fields on one knowledge node.
+
+        The server applies the team edit policy and a per-type field
+        whitelist. Correcting an Entity's name or type retracts the old
+        entity and returns the id of its successor.
+
+        Args:
+            model_id: World model ID containing the node
+            node_id: Node id to update
+            node_type: Decision, Insight, Context, Alternative, Motivation,
+                CodeEntity, Requirement, or Entity
+            updates: Field names mapped to new string values
+
+        Returns:
+            MCP result describing the update
+
+        Raises:
+            ValidationError: If an id is empty or updates is not a non-empty
+                mapping of strings to strings
+
+        Example:
+            >>> client.update_node(
+            ...     model_id="...",
+            ...     node_id="decision_...",
+            ...     node_type="Decision",
+            ...     updates={"status": "accepted"},
+            ... )
+        """
+        for field_name, value in (
+            ("model_id", model_id),
+            ("node_id", node_id),
+            ("node_type", node_type),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValidationError(f"{field_name} is required", field=field_name)
+        if not isinstance(updates, dict) or not updates:
+            raise ValidationError("updates must be a non-empty object", field="updates")
+        for key, value in updates.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ValidationError(
+                    "updates must map field names to string values",
+                    field="updates",
+                )
+        return self._mcp_call(
+            "updateNode",
+            {
+                "model_id": model_id.strip(),
+                "node_id": node_id.strip(),
+                "node_type": node_type.strip(),
+                "updates": dict(updates),
+            },
+        )
+
+    def capture_image(
+        self,
+        image_data: str,
+        mime_type: str,
+        title: str,
+        description: str = "",
+        category: str = "other",
+        related_file_path: str = "",
+        model_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Capture an image to the knowledge graph.
+
+        Images are processed with Vision AI for descriptions, OCR text
+        extraction, and semantic embeddings for search.
+
+        Args:
+            image_data: Base64-encoded image data
+            mime_type: Image MIME type (image/png, image/jpeg, image/webp, image/gif)
+            title: Human-readable title for the image
+            description: Description of what this image shows
+            category: Image category (screenshot, diagram, asset, other)
+            related_file_path: Optional file path to link image to code
+            model_id: World model ID to capture to (required for CLI usage)
+
+        Returns:
+            Confirmation with image_id and processing status
+
+        Example:
+            >>> import base64
+            >>> with open("screenshot.png", "rb") as f:
+            ...     image_b64 = base64.b64encode(f.read()).decode()
+            >>> result = client.capture_image(
+            ...     image_data=image_b64,
+            ...     mime_type="image/png",
+            ...     title="Login page screenshot",
+            ...     category="screenshot"
+            ... )
+            >>> print(result["image_id"])
+        """
+        params = {
+            "image_data": image_data,
+            "mime_type": mime_type,
+            "title": title,
+            "description": description,
+            "category": category,
+        }
+        if related_file_path:
+            params["related_file_path"] = related_file_path
+        if model_id:
+            params["model_id"] = model_id
+        return self._mcp_call("captureImage", params)
+
+    def capture_image_batch(
+        self,
+        images: List[Dict[str, Any]],
+        default_category: str = "other",
+        model_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Capture multiple images to the knowledge graph in one operation.
+
+        More efficient than calling capture_image repeatedly when you have
+        multiple images to upload.
+
+        Args:
+            images: List of image dicts, each with:
+                - image_data: Base64-encoded image data (required)
+                - mime_type: Image MIME type (required)
+                - title: Human-readable title (required)
+                - description: What this image shows (optional)
+                - category: screenshot, diagram, asset, other (optional)
+            default_category: Category for images without explicit category
+            model_id: World model ID (defaults to active model)
+
+        Returns:
+            Batch result with total, succeeded, failed counts and per-image results
+
+        Example:
+            >>> import base64
+            >>> images = []
+            >>> for path in ["arch.png", "flow.png"]:
+            ...     with open(path, "rb") as f:
+            ...         images.append({
+            ...             "image_data": base64.b64encode(f.read()).decode(),
+            ...             "mime_type": "image/png",
+            ...             "title": Path(path).stem
+            ...         })
+            >>> result = client.capture_image_batch(images, default_category="diagram")
+            >>> print(f"Captured {result['succeeded']} of {result['total']} images")
+        """
+        params: Dict[str, Any] = {
+            "images": images,
+            "default_category": default_category,
+        }
+        if model_id:
+            params["model_id"] = model_id
+        return self._mcp_call("captureImageBatch", params)
+
+    def search_images(
+        self,
+        query: str,
+        model_id: str = "",
+        mode: str = "hybrid",
+        category: str = "",
+        limit: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        Search for images in the knowledge graph.
+
+        Supports text search (titles, descriptions, OCR text) and
+        semantic search (CLIP embeddings for visual similarity).
+
+        Args:
+            query: Natural language search query
+            model_id: World model ID to search (required for CLI usage)
+            mode: Search mode - text, semantic, or hybrid (default)
+            category: Filter by category (screenshot, diagram, asset, other)
+            limit: Maximum results (1-50, default: 10)
+
+        Returns:
+            Matching images with scores and metadata
+
+        Example:
+            >>> results = client.search_images(
+            ...     query="architecture diagram",
+            ...     mode="hybrid",
+            ...     limit=5
+            ... )
+            >>> for img in results["results"]:
+            ...     print(f"{img['title']} - score: {img['score']}")
+        """
+        params = {
+            "query": query,
+            "mode": mode,
+            "limit": limit,
+        }
+        if model_id:
+            params["model_id"] = model_id
+        if category:
+            params["category"] = category
+        return self._mcp_call("searchImages", params)
 
     # -------------------------------------------------------------------------
     # Project Monitoring
@@ -1468,6 +1714,526 @@ class CreateStateClient:
         """
         response = self._request("POST", f"/sdk/github/import-cancel/{job_id}")
         return response.get("success", False)
+
+    # =========================================================================
+    # Teams Features (Teams/Enterprise Tier)
+    # =========================================================================
+
+    def create_team(
+        self,
+        name: str,
+        description: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Create a new team for collaboration.
+
+        Requires Teams or Enterprise tier subscription.
+
+        Args:
+            name: Team name (3-100 characters)
+            description: Optional team description (max 500 characters)
+
+        Returns:
+            Created team details including team_id
+
+        Example:
+            >>> team = client.create_team("Backend Team", "API and services")
+            >>> print(team["team_id"])
+        """
+        return self._mcp_call(
+            "createTeam",
+            {
+                "name": name,
+                "description": description,
+            },
+        )
+
+    def list_teams(self) -> Dict[str, Any]:
+        """
+        List all teams you belong to.
+
+        Requires Teams or Enterprise tier subscription.
+
+        Returns:
+            List of teams with details (id, name, role, member count)
+
+        Example:
+            >>> teams = client.list_teams()
+            >>> for team in teams["teams"]:
+            ...     print(f"{team['name']} ({team['role']})")
+        """
+        return self._mcp_call("listTeams", {})
+
+    def get_team_details(self, team_id: str) -> Dict[str, Any]:
+        """
+        Get details for a specific team including members and projects.
+
+        Requires Teams or Enterprise tier subscription.
+
+        Args:
+            team_id: Team UUID
+
+        Returns:
+            Team details including members, shared projects, and settings
+
+        Example:
+            >>> details = client.get_team_details("abc-123")
+            >>> print(f"Members: {len(details['members'])}")
+        """
+        return self._mcp_call("getTeamDetails", {"team_id": team_id})
+
+    def list_team_members(self, team_id: str) -> Dict[str, Any]:
+        """
+        List members of a team.
+
+        Requires Teams or Enterprise tier subscription.
+
+        Args:
+            team_id: Team UUID
+
+        Returns:
+            List of team members with roles and details
+
+        Example:
+            >>> members = client.list_team_members("abc-123")
+            >>> for member in members["members"]:
+            ...     print(f"{member['email']} - {member['role']}")
+        """
+        return self._mcp_call("listTeamMembers", {"team_id": team_id})
+
+    def invite_to_team(
+        self,
+        team_id: str,
+        email: str,
+        role: str = "member",
+    ) -> Dict[str, Any]:
+        """
+        Invite a user to join a team.
+
+        Requires admin role on the team and Teams/Enterprise tier.
+
+        Args:
+            team_id: Team UUID
+            email: Email address to invite
+            role: Role to assign (admin, member, viewer). Default: member
+
+        Returns:
+            Invitation details
+
+        Example:
+            >>> result = client.invite_to_team("abc-123", "dev@example.com")
+            >>> print(f"Invited: {result['email']}")
+        """
+        return self._mcp_call(
+            "inviteToTeam",
+            {
+                "team_id": team_id,
+                "email": email,
+                "role": role,
+            },
+        )
+
+    def remove_team_member(
+        self,
+        team_id: str,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Remove a member from a team.
+
+        Requires admin role on the team and Teams/Enterprise tier.
+
+        Args:
+            team_id: Team UUID
+            user_id: User UUID to remove
+
+        Returns:
+            Confirmation of removal
+
+        Example:
+            >>> client.remove_team_member("abc-123", "user-456")
+        """
+        return self._mcp_call(
+            "removeTeamMember",
+            {
+                "team_id": team_id,
+                "user_id": user_id,
+            },
+        )
+
+    def update_member_role(
+        self,
+        team_id: str,
+        user_id: str,
+        role: str,
+    ) -> Dict[str, Any]:
+        """
+        Change a team member's role.
+
+        Requires admin role on the team and Teams/Enterprise tier.
+
+        Args:
+            team_id: Team UUID
+            user_id: User UUID to update
+            role: New role (admin, member, viewer)
+
+        Returns:
+            Updated member details
+
+        Example:
+            >>> client.update_member_role("abc-123", "user-456", "admin")
+        """
+        return self._mcp_call(
+            "updateMemberRole",
+            {
+                "team_id": team_id,
+                "user_id": user_id,
+                "role": role,
+            },
+        )
+
+    # -------------------------------------------------------------------------
+    # Project Sharing
+    # -------------------------------------------------------------------------
+
+    def share_project_with_team(
+        self,
+        team_id: str,
+        world_model_id: str,
+        world_model_name: str = "",
+        permission: str = "read",
+    ) -> Dict[str, Any]:
+        """
+        Share a world model/project with a team.
+
+        Only the project owner can share. Requires Teams/Enterprise tier.
+
+        Args:
+            team_id: Team UUID to share with
+            world_model_id: World model UUID to share
+            world_model_name: Display name for the project (optional)
+            permission: Access level (read, write, admin). Default: read
+
+        Returns:
+            Sharing confirmation with details
+
+        Example:
+            >>> client.share_project_with_team(
+            ...     "team-123",
+            ...     "model-456",
+            ...     permission="write"
+            ... )
+        """
+        params = {
+            "team_id": team_id,
+            "world_model_id": world_model_id,
+            "permission": permission,
+        }
+        if world_model_name:
+            params["world_model_name"] = world_model_name
+        return self._mcp_call("shareProjectWithTeam", params)
+
+    def unshare_project_from_team(
+        self,
+        team_id: str,
+        world_model_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Remove project sharing from a team.
+
+        Requires Teams/Enterprise tier.
+
+        Args:
+            team_id: Team UUID
+            world_model_id: World model UUID to unshare
+
+        Returns:
+            Confirmation of unsharing
+
+        Example:
+            >>> client.unshare_project_from_team("team-123", "model-456")
+        """
+        return self._mcp_call(
+            "unshareProjectFromTeam",
+            {
+                "team_id": team_id,
+                "world_model_id": world_model_id,
+            },
+        )
+
+    def list_team_projects(self, team_id: str) -> Dict[str, Any]:
+        """
+        List projects shared with a team.
+
+        Requires Teams/Enterprise tier.
+
+        Args:
+            team_id: Team UUID
+
+        Returns:
+            List of shared projects with permissions
+
+        Example:
+            >>> projects = client.list_team_projects("team-123")
+            >>> for proj in projects["projects"]:
+            ...     print(f"{proj['name']} ({proj['permission']})")
+        """
+        return self._mcp_call("listTeamProjects", {"team_id": team_id})
+
+    # -------------------------------------------------------------------------
+    # Working Capacity
+    # -------------------------------------------------------------------------
+
+    def get_working_capacity(self, world_model_id: str) -> Dict[str, Any]:
+        """
+        Get the current working capacity for a project.
+
+        Shows which team context is active and available options.
+        Requires Teams/Enterprise tier.
+
+        Args:
+            world_model_id: Project/world model UUID
+
+        Returns:
+            Current capacity info and available team options
+
+        Example:
+            >>> capacity = client.get_working_capacity("model-123")
+            >>> print(f"Working as: {capacity['current_team']}")
+        """
+        return self._mcp_call(
+            "getWorkingCapacity",
+            {"world_model_id": world_model_id},
+        )
+
+    def set_working_capacity(
+        self,
+        world_model_id: str,
+        team_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Set the team capacity for working on a project.
+
+        When a project is shared with multiple teams, this determines
+        which team's AI policy applies and how work is attributed.
+        Requires Teams/Enterprise tier.
+
+        Args:
+            world_model_id: Project/world model UUID
+            team_id: Team UUID to work under, or None for personal capacity
+
+        Returns:
+            Confirmation of capacity change
+
+        Example:
+            >>> client.set_working_capacity("model-123", "team-456")
+        """
+        params = {"world_model_id": world_model_id}
+        if team_id:
+            params["team_id"] = team_id
+        return self._mcp_call("setWorkingCapacity", params)
+
+    # -------------------------------------------------------------------------
+    # Team Intelligence
+    # -------------------------------------------------------------------------
+
+    def get_team_activity(
+        self,
+        team_id: str,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """
+        Get recent activity log for a team.
+
+        Requires admin or owner role. Requires Teams/Enterprise tier.
+
+        Args:
+            team_id: Team UUID
+            limit: Maximum activities to return (1-100, default: 20)
+
+        Returns:
+            List of recent team activities
+
+        Example:
+            >>> activity = client.get_team_activity("team-123", limit=10)
+            >>> for event in activity["activities"]:
+            ...     print(f"{event['timestamp']}: {event['description']}")
+        """
+        return self._mcp_call(
+            "getTeamActivity",
+            {
+                "team_id": team_id,
+                "limit": limit,
+            },
+        )
+
+    def get_team_pulse(
+        self,
+        team_id: str = "",
+        world_model_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Get a quick overview of team activity.
+
+        Shows who's active, what's happening, and top contributors.
+        Requires Teams/Enterprise tier.
+
+        Args:
+            team_id: Optional team UUID to filter by
+            world_model_id: Optional project UUID to filter by
+
+        Returns:
+            Team pulse summary with activity metrics
+
+        Example:
+            >>> pulse = client.get_team_pulse(team_id="team-123")
+            >>> print(f"Active members: {pulse['active_count']}")
+        """
+        params = {}
+        if team_id:
+            params["team_id"] = team_id
+        if world_model_id:
+            params["world_model_id"] = world_model_id
+        return self._mcp_call("getTeamPulse", params)
+
+    def find_topic_expert(
+        self,
+        topic: str,
+        team_id: str = "",
+        world_model_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Find team members with expertise in a specific topic.
+
+        Answers: "Who on the team knows the most about [topic]?"
+        Requires Teams/Enterprise tier.
+
+        Args:
+            topic: Topic or feature to find experts for
+                   (e.g., "authentication", "database", "billing")
+            team_id: Optional team UUID to limit search
+            world_model_id: Optional project UUID to limit search
+
+        Returns:
+            List of experts with relevance scores
+
+        Example:
+            >>> experts = client.find_topic_expert("authentication")
+            >>> for expert in experts["experts"]:
+            ...     print(f"{expert['name']}: {expert['score']}%")
+        """
+        params = {"topic": topic}
+        if team_id:
+            params["team_id"] = team_id
+        if world_model_id:
+            params["world_model_id"] = world_model_id
+        return self._mcp_call("findTopicExpert", params)
+
+    def get_colleague_activity(
+        self,
+        colleague_email: str,
+        days: int = 7,
+        world_model_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Get activity summary for a colleague.
+
+        Answers: "What has [colleague] changed or added recently?"
+        Requires Teams/Enterprise tier.
+
+        Args:
+            colleague_email: Email of the colleague
+            days: Look back period in days (1-90, default: 7)
+            world_model_id: Optional project UUID to filter by
+
+        Returns:
+            Activity summary with recent contributions
+
+        Example:
+            >>> activity = client.get_colleague_activity("dev@example.com")
+            >>> print(f"Contributions: {activity['contribution_count']}")
+        """
+        params = {
+            "colleague_email": colleague_email,
+            "days": days,
+        }
+        if world_model_id:
+            params["world_model_id"] = world_model_id
+        return self._mcp_call("getColleagueActivity", params)
+
+    def get_contributor_stats(
+        self,
+        contributor_email: str,
+        world_model_id: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Get contribution statistics for a team member.
+
+        Includes totals, breakdowns by type, and AI models used.
+        Requires Teams/Enterprise tier.
+
+        Args:
+            contributor_email: Email of the contributor
+            world_model_id: Optional project UUID to filter by
+
+        Returns:
+            Contribution statistics and breakdowns
+
+        Example:
+            >>> stats = client.get_contributor_stats("dev@example.com")
+            >>> print(f"Total contributions: {stats['total']}")
+        """
+        params = {"contributor_email": contributor_email}
+        if world_model_id:
+            params["world_model_id"] = world_model_id
+        return self._mcp_call("getContributorStats", params)
+
+    def search_by_contributor(
+        self,
+        contributor_email: str,
+        world_model_id: str = "",
+        entity_types: Optional[List[str]] = None,
+        start_date: str = "",
+        end_date: str = "",
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        Search contributions made by a team member.
+
+        Useful for auditing and understanding who worked on what.
+        Requires Teams/Enterprise tier.
+
+        Args:
+            contributor_email: Email of the contributor
+            world_model_id: Optional project UUID to filter by
+            entity_types: Filter by types (code, context, decision, insight)
+            start_date: Start date filter (YYYY-MM-DD)
+            end_date: End date filter (YYYY-MM-DD)
+            limit: Maximum results (1-100, default: 50)
+
+        Returns:
+            List of contributions matching criteria
+
+        Example:
+            >>> results = client.search_by_contributor(
+            ...     "dev@example.com",
+            ...     entity_types=["code"],
+            ...     limit=20
+            ... )
+        """
+        params = {
+            "contributor_email": contributor_email,
+            "limit": limit,
+        }
+        if world_model_id:
+            params["world_model_id"] = world_model_id
+        if entity_types:
+            params["entity_types"] = entity_types
+        if start_date:
+            params["start_date"] = start_date
+        if end_date:
+            params["end_date"] = end_date
+        return self._mcp_call("searchByContributor", params)
 
     def close(self):
         """Close the HTTP client."""

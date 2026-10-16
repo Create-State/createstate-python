@@ -39,7 +39,7 @@ from .exceptions import (
     ValidationError,
 )
 
-__version__ = "0.3.10"
+__version__ = "0.6.0"
 __all__ = [
     "CreateStateClient",
     "CreateStateError",

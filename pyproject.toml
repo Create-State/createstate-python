@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "createstate"
-version = "0.3.10"
-description = "Create State - Enterprise AI Code Intelligence Platform SDK"
+version = "0.6.0"
+description = "Create State - Enterprise AI Code Intelligence Platform SDK with Teams collaboration"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "MIT"
 license-files = ["LICENSE"]
@@ -22,6 +22,9 @@ keywords = [
     "mcp",
     "developer-tools",
     "code-intelligence",
+    "teams",
+    "enterprise",
+    "collaboration",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
